@@ -1,0 +1,93 @@
+# AIClaw Configuration Example
+#
+# Copy this file to ~/.aiclaw/config.toml and customize it.
+
+[agent]
+name = "aiclaw"
+session_timeout_secs = 3600
+concurrent_limit = 100
+default_cluster = "prod"
+compact_prompt = false
+
+# Feishu (飞书) Configuration
+[channels.feishu]
+type = "Feishu"
+enabled = true
+bot_name = "AIOps Bot"
+# Webhook URL for receiving messages (set one of webhook_url or long_polling)
+webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# Long polling configuration
+# app_id = "cli_xxxxxxxxxxxxxxxx"
+# app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# long_polling_timeout_secs = 30
+
+# WeCom (企业微信) Configuration
+[channels.wecom]
+type = "WeCom"
+enabled = false
+corp_id = "wwxxxxxxxxxxxxxx"
+agent_id = "1000001"
+# webhook_url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# Skills Configuration
+[skills]
+skills_dir = "~/.aiclaw/skills"
+open_skills_enabled = false
+allowed_scripts = false
+
+# MCP Server Configuration (VictoriaMetrics, etc.)
+[mcp.servers.victoriametrics]
+enabled = true
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-victoriametrics"]
+
+[mcp.transport]
+transport_type = "Stdio"
+
+# AI/OPS Providers
+[aiops.victoria]
+enabled = true
+provider_type = "victoria"
+endpoint = "http://victoriametrics:8428"
+timeout_secs = 30
+retry_attempts = 3
+
+[aiops.prometheus]
+enabled = false
+provider_type = "prometheus"
+endpoint = "http://prometheus:9090"
+timeout_secs = 30
+retry_attempts = 3
+
+# Kubernetes Clusters
+[kubernetes.prod]
+enabled = true
+context = "prod"
+kubeconfig_path = "~/.kube/config"
+default_namespace = "default"
+timeout_secs = 10
+
+[kubernetes.dev]
+enabled = false
+context = "dev"
+kubeconfig_path = "~/.kube/config-dev"
+default_namespace = "dev"
+timeout_secs = 10
+
+# Observability
+[observability]
+observability_type = "Log"  # Log, Prometheus, OpenTelemetry
+otel_endpoint = "http://localhost:4317"  # OpenTelemetry collector endpoint
+metrics_port = 9090
+tracing_level = "Info"  # Debug, Info, Warn, Error
+
+# Security
+[security]
+dangerous_commands = ["rm", "dd", "mkfs"]
+sensitive_path_suffixes = [".kubeconfig", ".docker/config.json", ".aws/credentials"]
+
+# Logging
+[logging]
+level = "info"
+format = "Json"  # Json, Plain
+output = "Stdout"  # Stdout, File

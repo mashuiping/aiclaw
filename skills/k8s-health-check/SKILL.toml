@@ -1,0 +1,45 @@
+name = "k8s-health-check"
+description = "检查 Kubernetes 集群和 Pod 的健康状态"
+version = "1.0.0"
+author = "platform-team"
+tags = ["kubernetes", "health", "status", "k8s"]
+
+[[tools]]
+name = "kubectl_get_pods"
+description = "获取 Pod 列表"
+kind = "shell"
+command = "kubectl"
+args = { namespace = "{{namespace}}", cmd = "get pods", output = "wide" }
+
+[[tools]]
+name = "kubectl_get_nodes"
+description = "获取节点列表"
+kind = "shell"
+command = "kubectl"
+args = { cmd = "get nodes", output = "wide" }
+
+[[tools]]
+name = "kubectl_get_events"
+description = "获取集群事件"
+kind = "shell"
+command = "kubectl"
+args = { cmd = "get events", sort_by = "LASTSEEN", all_namespaces = "true" }
+
+[[tools]]
+name = "kubectl_top_nodes"
+description = "获取节点资源使用情况"
+kind = "shell"
+command = "kubectl"
+args = { cmd = "top nodes" }
+
+[prompts]
+system = """你是一个 K8s 健康检查助手，专门帮助用户检查 Kubernetes 集群和 Pod 的健康状态。
+你可以：
+1. 检查集群节点状态
+2. 检查命名空间中的 Pod 状态
+3. 查看集群事件
+4. 检查资源使用情况
+
+当用户请求健康检查时，综合多个 kubectl 命令的结果给出整体评估。
+"""
+compact = "K8s 健康检查：namespace={{namespace}}"

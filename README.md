@@ -1,20 +1,27 @@
-# AIClaw - AI Ops Agent
+# AIClaw
 
 <p align="center">
-  <img src="assets/mascot.png" alt="AIClaw 吉祥物：穿龙虾装的小仓鼠" width="280">
+  <img src="assets/mascot.png" alt="" width="280">
 </p>
-<p align="center"><em>本项目吉祥物 —— 外壳是龙虾的硬，内心是仓鼠的软；查指标撸 K8s 时一样凶萌。</em></p>
 
-A Rust-based AI operations agent that connects to messaging platforms (Feishu, WeCom), loads Skills, queries observability data (VictoriaMetrics, Prometheus), and troubleshoots Kubernetes clusters.
+A Rust AI operations agent: Feishu and WeCom in front, filesystem Skills and MCP alongside, VictoriaMetrics and Kubernetes when you need to see what happened.
+
+It loads skills from disk, integrates Model Context Protocol servers (for example VictoriaMetrics MCP), pulls metrics and logs from VictoriaMetrics or Prometheus, inspects cluster state and pod output, and ships with OpenTelemetry tracing for the agent itself.
+
+## Goals
+
+- **Chat-first ops**: Talk to the agent from enterprise messaging bots instead of context-switching to a dozen consoles.
+- **Skills you own**: Drop-in skills under `~/.aiclaw/skills/` with a small declarative contract.
+- **MCP where it fits**: Reuse observability and tooling through MCP instead of bespoke glue for every backend.
+- **Observable agent**: Trace the orchestrator with OpenTelemetry, not only the workloads it watches.
 
 ## Features
 
-- **Multi-Channel Support**: Connect to Feishu (飞书) and WeCom (企业微信)
-- **Skill System**: Load and execute custom skills from filesystem
-- **MCP Client**: Integrate with Model Context Protocol servers (e.g., VictoriaMetrics MCP)
-- **Observability**: Query metrics and logs from VictoriaMetrics/Prometheus
-- **Kubernetes Integration**: Query cluster state, pod logs, events
-- **Observability**: Full OpenTelemetry tracing support
+- **Channels**: Feishu (飞书) and WeCom (企业微信)
+- **Skill system**: Load and execute skills from the filesystem
+- **MCP client**: Call MCP servers (e.g. VictoriaMetrics MCP)
+- **Observability data**: Metrics and logs via VictoriaMetrics / Prometheus
+- **Kubernetes**: Cluster state, pod logs, events
 
 ## Architecture
 
@@ -51,7 +58,7 @@ A Rust-based AI operations agent that connects to messaging platforms (Feishu, W
 └───────────────────────────────┘
 ```
 
-## Getting Started
+## Quick start
 
 ### Prerequisites
 

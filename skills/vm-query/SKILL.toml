@@ -1,0 +1,31 @@
+name = "vm-query"
+description = "查询 VictoriaMetrics 指标和日志数据"
+version = "1.0.0"
+author = "platform-team"
+tags = ["victoriametrics", "metrics", "logs", "vm", "observability"]
+
+[[tools]]
+name = "vm_query_metrics"
+description = "查询 VictoriaMetrics 指标"
+kind = "http"
+command = "{{vm_url}}/api/v1/query_range"
+args = { query = "{{metric_query}}", start = "{{start}}", end = "{{end}}", step = "{{step}}" }
+
+[[tools]]
+name = "vm_query_logs"
+description = "查询 VictoriaMetrics 日志"
+kind = "http"
+command = "{{vm_url}}/select/logsql/query"
+args = { query = "{{log_query}}", limit = "{{limit}}" }
+
+[prompts]
+system = """你是一个可观测性数据查询助手，专门帮助用户查询 VictoriaMetrics 中的指标和日志数据。
+你可以：
+1. 使用 PromQL 查询指标数据
+2. 使用 LogSQL 查询日志数据
+3. 分析时序数据的趋势和异常
+4. 帮助用户理解指标和日志的含义
+
+当用户提供查询表达式时，构造合适的 API 请求并格式化结果。
+"""
+compact = "VictoriaMetrics 查询：type={{query_type}}, query={{query}}"

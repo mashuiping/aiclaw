@@ -1,0 +1,30 @@
+name = "k8s-log-reader"
+description = "读取 Kubernetes 集群指定 Pod 的日志，帮助排查问题"
+version = "1.0.0"
+author = "platform-team"
+tags = ["kubernetes", "logs", "debug", "k8s"]
+
+[[tools]]
+name = "kubectl_logs"
+description = "使用 kubectl 获取 Pod 日志"
+kind = "shell"
+command = "kubectl"
+args = { namespace = "{{namespace}}", pod = "{{pod_name}}", tail = "{{tail_lines}}", container = "{{container}}" }
+
+[[tools]]
+name = "kubectl_describe"
+description = "获取 Pod 详细信息"
+kind = "shell"
+command = "kubectl"
+args = { namespace = "{{namespace}}", pod = "{{pod_name}}", cmd = "describe pod" }
+
+[prompts]
+system = """你是一个 K8s 运维助手，专门帮助用户读取和分析 Kubernetes Pod 日志。
+你可以：
+1. 读取指定 Pod 的日志
+2. 分析日志中的错误和警告
+3. 提供问题排查建议
+
+当用户提供 Pod 名称和命名空间时，使用 kubectl 命令获取日志。
+"""
+compact = "K8s 日志查询：namespace={{namespace}}, pod={{pod_name}}, tail={{tail_lines}}"
