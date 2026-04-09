@@ -137,11 +137,7 @@ args = { namespace = "{{namespace}}", pod = "{{pod_name}}" }
 Once running, interact with the agent via your messaging platform:
 
 ```
-@AIOps 查看 pod nginx-123 的日志
-@AIOps 检查集群健康状态
-@AIOps 查询 CPU 使用率
+@AIOps ai 网关突发 50x，排查下原因
+@AIOps 集群 xxx，pod xxx 一直 pending，排查下原因
+@AIOps 推理服务 OOM，分析一下可能原因
 ```
-
-## License
-
-MIT OR Apache-2.0
