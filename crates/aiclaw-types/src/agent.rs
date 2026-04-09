@@ -16,6 +16,32 @@ pub struct Session {
     pub context: SessionContext,
 }
 
+/// Chat message for conversation history
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: MessageRole,
+    pub content: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageRole {
+    System,
+    User,
+    Assistant,
+}
+
+impl MessageRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MessageRole::System => "system",
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+        }
+    }
+}
+
 /// Session state
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SessionState {
@@ -34,6 +60,18 @@ pub struct SessionContext {
     pub last_parameters: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub history: Vec<InteractionRecord>,
+    /// Conversation messages for multi-turn dialogue
+    #[serde(default)]
+    pub conversation_history: Vec<ChatMessage>,
+    /// Current cluster context
+    #[serde(default)]
+    pub current_cluster: Option<String>,
+    /// Current namespace context
+    #[serde(default)]
+    pub current_namespace: Option<String>,
+    /// Pending clarification question
+    #[serde(default)]
+    pub pending_question: Option<String>,
 }
 
 /// Record of a single interaction

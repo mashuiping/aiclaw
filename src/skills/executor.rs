@@ -1,19 +1,35 @@
 //! Skill executor - executes skills and their tools
 
 use aiclaw_types::skill::{SkillContext, SkillTool, ToolKind, ToolResult};
-use chrono::Utc;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::time::Instant;
-use tracing::{debug, error, info};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing::{debug, warn};
+
+use crate::security::command_validator::{CommandValidator, ValidationResult};
 
 /// Skill executor - executes tools defined in skills
-pub struct SkillExecutor;
+pub struct SkillExecutor {
+    validator: Arc<CommandValidator>,
+    default_timeout: Duration,
+}
 
 impl SkillExecutor {
     pub fn new() -> Self {
-        Self
+        Self::with_validator(Arc::new(CommandValidator::default()))
+    }
+
+    pub fn with_validator(validator: Arc<CommandValidator>) -> Self {
+        Self {
+            validator,
+            default_timeout: Duration::from_secs(30),
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.default_timeout = timeout;
+        self
     }
 
     /// Execute a tool from a skill
@@ -23,16 +39,56 @@ impl SkillExecutor {
         args: &HashMap<String, String>,
     ) -> anyhow::Result<ToolResult> {
         let start = Instant::now();
-        let template_args = args;
+
+        // Validate command before execution (for shell commands)
+        if tool.kind == ToolKind::Shell {
+            let command = self.interpolate(&tool.command, args);
+            let validation = self.validator.validate(&command);
+
+            if !validation.allowed {
+                warn!(
+                    "Command blocked by validator: {} - {}",
+                    command,
+                    validation.reason.as_deref().unwrap_or("Unknown reason")
+                );
+                return Ok(ToolResult {
+                    tool_name: tool.name.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(format!(
+                        "Command blocked: {}. Reason: {}",
+                        command,
+                        validation.reason.as_deref().unwrap_or("Not in whitelist")
+                    )),
+                    execution_time_ms: start.elapsed().as_millis() as u64,
+                    evidence: vec![],
+                });
+            }
+
+            if validation.requires_confirmation {
+                warn!("Command requires confirmation: {}", command);
+                return Ok(ToolResult {
+                    tool_name: tool.name.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(format!(
+                        "Command requires confirmation: {}. Risk level: {:?}",
+                        command, validation.risk_level
+                    )),
+                    execution_time_ms: start.elapsed().as_millis() as u64,
+                    evidence: vec![],
+                });
+            }
+        }
 
         match tool.kind {
-            ToolKind::Shell => self.execute_shell(tool, template_args, start).await,
-            ToolKind::Http => self.execute_http(tool, template_args, start).await,
-            ToolKind::Script => self.execute_script(tool, template_args, start).await,
+            ToolKind::Shell => self.execute_shell(tool, args, start).await,
+            ToolKind::Http => self.execute_http(tool, args, start).await,
+            ToolKind::Script => self.execute_script(tool, args, start).await,
         }
     }
 
-    /// Execute a shell command
+    /// Execute a shell command with timeout
     async fn execute_shell(
         &self,
         tool: &SkillTool,
@@ -52,29 +108,66 @@ impl SkillExecutor {
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
-        debug!("Executing shell: {}", command);
+        debug!("Executing shell with timeout {:?}: {}", self.default_timeout, command);
 
-        let output = cmd.output().await?;
+        let output = match tokio::time::timeout(self.default_timeout, cmd.output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                return Ok(ToolResult {
+                    tool_name: tool.name.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(format!("Command execution error: {}", e)),
+                    execution_time_ms: start.elapsed().as_millis() as u64,
+                    evidence: vec![],
+                });
+            }
+            Err(_) => {
+                // Timeout
+                warn!("Command timed out after {:?}: {}", self.default_timeout, command);
+                return Ok(ToolResult {
+                    tool_name: tool.name.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(format!(
+                        "Command timed out after {:?}",
+                        self.default_timeout
+                    )),
+                    execution_time_ms: start.elapsed().as_millis() as u64,
+                    evidence: vec![],
+                });
+            }
+        };
+
         let duration = start.elapsed();
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         let success = output.status.success();
-        let output_combined = if stdout.is_empty() { stderr.clone() } else { stdout };
+        let output_combined = if stdout.is_empty() {
+            stderr.clone()
+        } else {
+            stdout
+        };
 
         Ok(ToolResult {
             tool_name: tool.name.clone(),
             success,
-            output: if success { Some(output_combined) } else { None },
+            output: if success {
+                Some(output_combined)
+            } else {
+                None
+            },
             error: if !success { Some(stderr) } else { None },
             execution_time_ms: duration.as_millis() as u64,
             evidence: vec![],
         })
     }
 
-    /// Execute an HTTP request
+    /// Execute an HTTP request with timeout
     async fn execute_http(
         &self,
         tool: &SkillTool,
@@ -82,9 +175,11 @@ impl SkillExecutor {
         start: Instant,
     ) -> anyhow::Result<ToolResult> {
         let url = self.interpolate(&tool.command, args);
-        let duration = start.elapsed();
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(self.default_timeout)
+            .build()?;
+
         let mut request = client.get(&url);
 
         for (key, value) in &tool.env {
@@ -101,9 +196,39 @@ impl SkillExecutor {
             request = request.query(&query_params);
         }
 
-        debug!("Executing HTTP GET: {}", url);
+        debug!("Executing HTTP GET with timeout {:?}: {}", self.default_timeout, url);
 
-        let response = request.send().await?;
+        let response = match tokio::time::timeout(self.default_timeout, request.send()).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
+                return Ok(ToolResult {
+                    tool_name: tool.name.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(format!("HTTP request error: {}", e)),
+                    execution_time_ms: start.elapsed().as_millis() as u64,
+                    evidence: vec![],
+                });
+            }
+            Err(_) => {
+                warn!(
+                    "HTTP request timed out after {:?}: {}",
+                    self.default_timeout, url
+                );
+                return Ok(ToolResult {
+                    tool_name: tool.name.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(format!(
+                        "HTTP request timed out after {:?}",
+                        self.default_timeout
+                    )),
+                    execution_time_ms: start.elapsed().as_millis() as u64,
+                    evidence: vec![],
+                });
+            }
+        };
+
         let duration = start.elapsed();
 
         let success = response.status().is_success();
@@ -113,13 +238,17 @@ impl SkillExecutor {
             tool_name: tool.name.clone(),
             success,
             output: if success { Some(body.clone()) } else { None },
-            error: if !success { Some(body) } else { None },
+            error: if !success {
+                Some(format!("HTTP {}: {}", response.status(), body))
+            } else {
+                None
+            },
             execution_time_ms: duration.as_millis() as u64,
             evidence: vec![],
         })
     }
 
-    /// Execute a script file
+    /// Execute a script file with timeout
     async fn execute_script(
         &self,
         tool: &SkillTool,
@@ -127,7 +256,6 @@ impl SkillExecutor {
         start: Instant,
     ) -> anyhow::Result<ToolResult> {
         let script_path = self.interpolate(&tool.command, args);
-        let duration = start.elapsed();
 
         let mut cmd = tokio::process::Command::new(&script_path);
         cmd.envs(&tool.env);
@@ -138,10 +266,41 @@ impl SkillExecutor {
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
-        debug!("Executing script: {}", script_path);
+        debug!(
+            "Executing script with timeout {:?}: {}",
+            self.default_timeout, script_path
+        );
 
-        let output = cmd.output().await?;
+        let output = match tokio::time::timeout(self.default_timeout, cmd.output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                return Ok(ToolResult {
+                    tool_name: tool.name.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(format!("Script execution error: {}", e)),
+                    execution_time_ms: start.elapsed().as_millis() as u64,
+                    evidence: vec![],
+                });
+            }
+            Err(_) => {
+                warn!(
+                    "Script timed out after {:?}: {}",
+                    self.default_timeout, script_path
+                );
+                return Ok(ToolResult {
+                    tool_name: tool.name.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(format!("Script timed out after {:?}", self.default_timeout)),
+                    execution_time_ms: start.elapsed().as_millis() as u64,
+                    evidence: vec![],
+                });
+            }
+        };
+
         let duration = start.elapsed();
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();

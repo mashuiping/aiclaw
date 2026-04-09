@@ -1,11 +1,14 @@
 //! Session management
 
-use aiclaw_types::agent::{InteractionRecord, Session, SessionContext, SessionState};
+use aiclaw_types::agent::{ChatMessage, InteractionRecord, MessageRole, Session, SessionContext, SessionState};
 use chrono::Utc;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
+
+/// Maximum number of conversation history messages to keep
+const MAX_CONVERSATION_HISTORY: usize = 20;
 
 /// Session manager - manages agent sessions
 pub struct SessionManager {
@@ -122,6 +125,85 @@ impl SessionManager {
             entry.context.last_skill = skill.map(String::from);
             entry.last_activity = Utc::now();
 
+            return Some(entry.value().clone());
+        }
+        None
+    }
+
+    /// Add a message to conversation history
+    pub fn add_message(
+        &self,
+        session_id: &str,
+        role: MessageRole,
+        content: String,
+    ) -> Option<Arc<Session>> {
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            let message = ChatMessage {
+                role,
+                content,
+                timestamp: Utc::now(),
+            };
+
+            entry.context.conversation_history.push(message);
+
+            // Trim history if too long
+            if entry.context.conversation_history.len() > MAX_CONVERSATION_HISTORY {
+                entry.context.conversation_history =
+                    entry.context.conversation_history.split_off(
+                        entry.context.conversation_history.len() - MAX_CONVERSATION_HISTORY
+                    );
+            }
+
+            entry.last_activity = Utc::now();
+            return Some(entry.value().clone());
+        }
+        None
+    }
+
+    /// Get conversation history for a session
+    pub fn get_conversation_history(&self, session_id: &str) -> Vec<ChatMessage> {
+        if let Some(entry) = self.sessions.get(session_id) {
+            entry.context.conversation_history.clone()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Set pending clarification question
+    pub fn set_pending_question(&self, session_id: &str, question: String) -> Option<Arc<Session>> {
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            entry.context.pending_question = Some(question);
+            entry.last_activity = Utc::now();
+            return Some(entry.value().clone());
+        }
+        None
+    }
+
+    /// Clear pending question
+    pub fn clear_pending_question(&self, session_id: &str) -> Option<Arc<Session>> {
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            entry.context.pending_question = None;
+            entry.last_activity = Utc::now();
+            return Some(entry.value().clone());
+        }
+        None
+    }
+
+    /// Set current cluster context
+    pub fn set_current_cluster(&self, session_id: &str, cluster: String) -> Option<Arc<Session>> {
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            entry.context.current_cluster = Some(cluster);
+            entry.last_activity = Utc::now();
+            return Some(entry.value().clone());
+        }
+        None
+    }
+
+    /// Set current namespace context
+    pub fn set_current_namespace(&self, session_id: &str, namespace: String) -> Option<Arc<Session>> {
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            entry.context.current_namespace = Some(namespace);
+            entry.last_activity = Utc::now();
             return Some(entry.value().clone());
         }
         None

@@ -5,6 +5,160 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+// ============================================================================
+// LLM Configuration
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LLMConfig {
+    #[serde(default = "default_llm_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_llm_provider")]
+    pub default_provider: String,
+    #[serde(default)]
+    pub routing: LLM RoutingConfig,
+    #[serde(default)]
+    pub providers: HashMap<String, LLMProviderConfig>,
+}
+
+fn default_llm_enabled() -> bool {
+    true
+}
+
+fn default_llm_provider() -> String {
+    "anthropic".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LLM RoutingConfig {
+    #[serde(default = "default_routing_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub openrouter: OpenRouterConfig,
+    #[serde(default)]
+    pub ollama: OllamaConfig,
+}
+
+fn default_routing_mode() -> String {
+    "direct".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OpenRouterConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OllamaConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_ollama_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+fn default_ollama_url() -> String {
+    "http://localhost:11434".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LLMProviderConfig {
+    pub enabled: bool,
+    pub provider_type: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default = "default_llm_model")]
+    pub model: String,
+    #[serde(default = "default_llm_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_llm_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub retry_attempts: u32,
+    #[serde(default)]
+    pub extra_headers: HashMap<String, String>,
+}
+
+fn default_llm_model() -> String {
+    "gpt-4o".to_string()
+}
+
+fn default_llm_max_tokens() -> u32 {
+    1024
+}
+
+fn default_llm_timeout() -> u64 {
+    60
+}
+
+impl Default for LLMConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_provider: default_llm_provider(),
+            routing: LLM RoutingConfig::default(),
+            providers: HashMap::new(),
+        }
+    }
+}
+
+impl Default for LLM RoutingConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_routing_mode(),
+            openrouter: OpenRouterConfig::default(),
+            ollama: OllamaConfig::default(),
+        }
+    }
+}
+
+impl Default for OpenRouterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: Some("https://openrouter.ai/api".to_string()),
+            api_key: None,
+        }
+    }
+}
+
+impl Default for OllamaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: default_ollama_url(),
+            model: Some("llama3".to_string()),
+            timeout_secs: Some(120),
+        }
+    }
+}
+
+impl Default for LLMProviderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider_type: "openai".to_string(),
+            api_key: None,
+            base_url: None,
+            model: default_llm_model(),
+            max_tokens: default_llm_max_tokens(),
+            timeout_secs: default_llm_timeout(),
+            retry_attempts: 3,
+            extra_headers: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Config {
     #[serde(default)]
@@ -33,6 +187,9 @@ pub struct Config {
 
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    #[serde(default)]
+    pub llm: LLMConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -304,6 +461,7 @@ impl Default for Config {
             observability: ObservabilityConfig::default(),
             security: SecurityConfig::default(),
             logging: LoggingConfig::default(),
+            llm: LLMConfig::default(),
         }
     }
 }

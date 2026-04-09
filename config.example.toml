@@ -91,3 +91,89 @@ sensitive_path_suffixes = [".kubeconfig", ".docker/config.json", ".aws/credentia
 level = "info"
 format = "Json"  # Json, Plain
 output = "Stdout"  # Stdout, File
+
+# ============================================================================
+# LLM Configuration (AI Intent Classification & Summarization)
+# ============================================================================
+
+[llm]
+enabled = true
+default_provider = "anthropic"  # Default provider: anthropic, openai, deepseek, zhipu, minimax, qwen
+
+# Routing mode: direct | openrouter | ollama
+# - direct: Call providers directly (default)
+# - openrouter: Route through OpenRouter gateway (supports multiple providers)
+# - ollama: Use local Ollama server
+[llm.routing]
+mode = "direct"
+
+# OpenRouter configuration (when mode = "openrouter")
+[llm.routing.openrouter]
+enabled = false
+base_url = "https://openrouter.ai/api"
+api_key = "${OPENROUTER_API_KEY}"
+
+# Ollama configuration (when mode = "ollama")
+[llm.routing.ollama]
+enabled = false
+base_url = "http://localhost:11434"
+model = "llama3"
+timeout_secs = 120
+
+# Provider: Anthropic (Claude)
+[llm.providers.anthropic]
+enabled = true
+provider_type = "anthropic"
+api_key = "${ANTHROPIC_API_KEY}"
+model = "claude-3-5-sonnet-20241022"
+max_tokens = 1024
+timeout_secs = 60
+
+# Provider: OpenAI
+[llm.providers.openai]
+enabled = false
+provider_type = "openai"
+api_key = "${OPENAI_API_KEY}"
+model = "gpt-4o"
+max_tokens = 1024
+timeout_secs = 60
+
+# Provider: DeepSeek
+[llm.providers.deepseek]
+enabled = false
+provider_type = "deepseek"
+api_key = "${DEEPSEEK_API_KEY}"
+base_url = "https://api.deepseek.com"
+model = "deepseek-chat"
+max_tokens = 1024
+timeout_secs = 60
+
+# Provider: Zhipu AI (智谱)
+[llm.providers.zhipu]
+enabled = false
+provider_type = "zhipu"
+api_key = "${ZHIPU_API_KEY}"
+base_url = "https://open.bigmodel.cn"
+model = "glm-4"
+max_tokens = 1024
+timeout_secs = 60
+
+# Provider: MiniMax
+[llm.providers.minimax]
+enabled = false
+provider_type = "minimax"
+api_key = "${MINIMAX_API_KEY}"
+base_url = "https://api.minimax.chat"
+model = "abab6.5s-chat"
+max_tokens = 1024
+timeout_secs = 60
+
+# Provider: Qwen (通义千问)
+[llm.providers.qwen]
+enabled = false
+provider_type = "qwen"
+api_key = "${DASHSCOPE_API_KEY}"
+base_url = "https://dashscope.aliyuncs.com"
+model = "qwen-turbo"
+max_tokens = 1024
+timeout_secs = 60

@@ -1,12 +1,21 @@
-//! Intent parsing
+//! Intent parsing - combines LLM-based and rule-based parsing
 
 use aiclaw_types::agent::{Intent, IntentEntities, IntentType};
 use regex::Regex;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tracing::{debug, warn};
+
+use crate::llm::intent::IntentClassifierImpl;
+use crate::llm::traits::{IntentClassifier, LLMProvider};
 
 /// Intent parser - parses user messages into structured intents
+/// Uses LLM when available, falls back to regex-based rules
 pub struct IntentParser {
     patterns: Vec<IntentPattern>,
+    llm_classifier: Option<Arc<dyn IntentClassifier>>,
+    llm_timeout: Duration,
 }
 
 struct IntentPattern {
@@ -17,8 +26,27 @@ struct IntentPattern {
 }
 
 impl IntentParser {
+    /// Create a new parser with optional LLM classifier
     pub fn new() -> Self {
-        let patterns = vec![
+        Self {
+            patterns: Self::build_patterns(),
+            llm_classifier: None,
+            llm_timeout: Duration::from_secs(10),
+        }
+    }
+
+    /// Create parser with LLM classifier
+    pub fn with_llm(provider: Arc<dyn LLMProvider>) -> Self {
+        let classifier = Arc::new(IntentClassifierImpl::new(provider));
+        Self {
+            patterns: Self::build_patterns(),
+            llm_classifier: Some(classifier),
+            llm_timeout: Duration::from_secs(10),
+        }
+    }
+
+    fn build_patterns() -> Vec<IntentPattern> {
+        vec![
             IntentPattern {
                 intent_type: IntentType::Logs,
                 keywords: vec![
@@ -61,8 +89,9 @@ impl IntentParser {
                     "排查".to_string(),
                     "问题".to_string(),
                     "调查".to_string(),
+                    "为什么".to_string(),
                 ],
-                regex: Regex::new(r"(?i)(?:debug|troubleshoot|排查|问题|调查)\s*").unwrap(),
+                regex: Regex::new(r"(?i)(?:debug|troubleshoot|排查|问题|调查|为什么)\s*").unwrap(),
                 entity_extractor: Regex::new(r"(?i)(?:pod|pods|svc|service|deploy)\s*[:=]?\s*(\S+)").unwrap(),
             },
             IntentPattern {
@@ -82,17 +111,78 @@ impl IntentParser {
                     "scale".to_string(),
                     "扩缩容".to_string(),
                     "replica".to_string(),
+                    "扩容".to_string(),
+                    "缩容".to_string(),
                 ],
-                regex: Regex::new(r"(?i)(?:scale|扩缩容|replica)\s*").unwrap(),
+                regex: Regex::new(r"(?i)(?:scale|扩缩容|replica|扩容|缩容)\s*").unwrap(),
                 entity_extractor: Regex::new(r"(?i)(?:deploy|deployment)\s*[:=]?\s*(\S+)\s*(?:replicas?|:|to)\s*(\d+)").unwrap(),
             },
-        ];
-
-        Self { patterns }
+        ]
     }
 
     /// Parse a user message into an intent
-    pub fn parse(&self, message: &str) -> Intent {
+    pub async fn parse(&self, message: &str) -> Intent {
+        // Try LLM first if available
+        if let Some(ref classifier) = self.llm_classifier {
+            match tokio::time::timeout(self.llm_timeout, classifier.classify(message)).await {
+                Ok(Ok(classification)) => {
+                    debug!(
+                        "LLM classified intent: {} (confidence: {:.2})",
+                        classification.intent_type, classification.confidence
+                    );
+
+                    let intent_type = match classification.intent_type.to_lowercase().as_str() {
+                        "logs" | "log" => IntentType::Logs,
+                        "metrics" | "metric" => IntentType::Metrics,
+                        "health" => IntentType::Health,
+                        "debug" => IntentType::Debug,
+                        "query" => IntentType::Query,
+                        "scale" => IntentType::Scale,
+                        "deploy" => IntentType::Deploy,
+                        _ => IntentType::Unknown,
+                    };
+
+                    // Merge LLM entities with rule-based extraction
+                    let mut entities = self.extract_entities_by_rules(message);
+                    if let Some(pod) = classification.entities.pod_name {
+                        entities.pod_name = Some(pod);
+                    }
+                    if let Some(ns) = classification.entities.namespace {
+                        entities.namespace = Some(ns);
+                    }
+                    if let Some(cluster) = classification.entities.cluster {
+                        entities.cluster = Some(cluster);
+                    }
+                    if let Some(svc) = classification.entities.service_name {
+                        entities.service_name = Some(svc);
+                    }
+
+                    return Intent {
+                        intent_type,
+                        confidence: classification.confidence,
+                        entities,
+                        raw_query: message.to_string(),
+                    };
+                }
+                Ok(Err(e)) => {
+                    warn!("LLM classification failed: {}", e);
+                }
+                Err(_) => {
+                    warn!("LLM classification timed out after {:?}", self.llm_timeout);
+                }
+            }
+        }
+
+        // Fall back to rule-based parsing
+        self.parse_by_rules(message)
+    }
+
+    /// Synchronous parse - uses rules only (for backwards compatibility)
+    pub fn parse_sync(&self, message: &str) -> Intent {
+        self.parse_by_rules(message)
+    }
+
+    fn parse_by_rules(&self, message: &str) -> Intent {
         let message_lower = message.to_lowercase();
 
         for pattern in &self.patterns {
@@ -133,22 +223,9 @@ impl IntentParser {
         confidence.min(1.0)
     }
 
-    /// Extract entities from message
-    fn extract_entities(&self, message: &str, pattern: &IntentPattern) -> IntentEntities {
+    /// Extract entities using only rules
+    fn extract_entities_by_rules(&self, message: &str) -> IntentEntities {
         let mut entities = IntentEntities::default();
-
-        if let Some(caps) = pattern.entity_extractor.captures(message) {
-            for (name, value) in caps.iter().enumerate() {
-                if let Some(m) = value {
-                    let val = m.as_str().to_string();
-                    match name {
-                        1 => entities.deployment_name = Some(val),
-                        2 => entities.namespace = Some(val),
-                        _ => {}
-                    }
-                }
-            }
-        }
 
         let pod_pattern = Regex::new(r"(?i)(?:pod|pods)\s*[:=]?\s*(\S+)").unwrap();
         if let Some(caps) = pod_pattern.captures(message) {
@@ -171,12 +248,62 @@ impl IntentParser {
             }
         }
 
+        // Also detect common cluster naming patterns like "prod", "test", "staging"
+        let cluster_keywords = [
+            ("prod", "prod"),
+            ("production", "prod"),
+            ("pre-prod", "pre-prod"),
+            ("preprod", "pre-prod"),
+            ("staging", "staging"),
+            ("test", "test"),
+            ("dev", "dev"),
+            ("development", "dev"),
+        ];
+
+        let message_lower = message.to_lowercase();
+        for (keyword, cluster_name) in &cluster_keywords {
+            // Match "prod cluster" or "cluster=prod" or "在 prod 集群"
+            let pattern = format!(r"(?i)(?:{}集群|{}集群|集群{}\s|cluster\s*{}|{}$)", keyword, keyword, keyword, keyword, keyword);
+            if let Some(re) = Regex::new(&pattern).ok().filter(|r| r.is_match(&message_lower)) {
+                let _ = re; // Silence unused warning
+                entities.cluster = Some(cluster_name.to_string());
+                break;
+            }
+        }
+
         let svc_pattern = Regex::new(r"(?i)(?:service|svc)\s*[:=]?\s*(\S+)").unwrap();
         if let Some(caps) = svc_pattern.captures(message) {
             if let Some(svc) = caps.get(1) {
                 entities.service_name = Some(svc.as_str().to_string());
             }
         }
+
+        entities
+    }
+
+    /// Extract entities from message
+    fn extract_entities(&self, message: &str, pattern: &IntentPattern) -> IntentEntities {
+        let mut entities = IntentEntities::default();
+
+        if let Some(caps) = pattern.entity_extractor.captures(message) {
+            for (name, value) in caps.iter().enumerate() {
+                if let Some(m) = value {
+                    let val = m.as_str().to_string();
+                    match name {
+                        1 => entities.deployment_name = Some(val),
+                        2 => entities.namespace = Some(val),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Also run common entity patterns
+        let common_entities = self.extract_entities_by_rules(message);
+        entities.pod_name = entities.pod_name.or(common_entities.pod_name);
+        entities.namespace = entities.namespace.or(common_entities.namespace);
+        entities.cluster = entities.cluster.or(common_entities.cluster);
+        entities.service_name = entities.service_name.or(common_entities.service_name);
 
         entities
     }
@@ -196,7 +323,7 @@ mod tests {
     fn test_parse_log_intent() {
         let parser = IntentParser::new();
 
-        let intent = parser.parse("查看 pod nginx-123 的日志");
+        let intent = parser.parse_by_rules("查看 pod nginx-123 的日志");
         assert_eq!(intent.intent_type, IntentType::Logs);
         assert!(intent.confidence > 0.5);
     }
@@ -205,7 +332,15 @@ mod tests {
     fn test_parse_health_intent() {
         let parser = IntentParser::new();
 
-        let intent = parser.parse("检查集群健康状态");
+        let intent = parser.parse_by_rules("检查集群健康状态");
         assert_eq!(intent.intent_type, IntentType::Health);
+    }
+
+    #[test]
+    fn test_parse_debug_intent() {
+        let parser = IntentParser::new();
+
+        let intent = parser.parse_by_rules("为什么我的 pod 启动失败了");
+        assert_eq!(intent.intent_type, IntentType::Debug);
     }
 }
