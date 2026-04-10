@@ -2,12 +2,10 @@
 
 use async_trait::async_trait;
 use aiclaw_types::channel::{
-    Attachment, ChannelMessage, FormattedMessage, Mention, MentionType,
-    MessageAction, MessageContent, MessageFormat, OutgoingContent, SendMessage, SenderInfo,
+    ChannelMessage, Mention, MentionType, MessageContent, MessageFormat, OutgoingContent, SendMessage, SenderInfo,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -48,7 +46,6 @@ pub struct FeishuEventHeader {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
 pub struct FeishuEventContent {
     pub sender: Option<FeishuSender>,
     pub message: Option<FeishuMessage>,
@@ -177,7 +174,7 @@ impl Channel for FeishuChannel {
 
         if self.config.webhook_url.is_some() {
             self.listen_webhook(tx).await?;
-        } else if self.config.long_polling_timeout_secs > 0 {
+        } else if self.config.polling_timeout_secs > 0 {
             self.listen_long_polling(tx).await?;
         } else {
             warn!("Feishu channel {} has no active listening mode configured", self.name);
@@ -251,6 +248,7 @@ impl FeishuChannel {
 
         #[derive(Deserialize)]
         struct TokenResponse {
+            #[allow(dead_code)]
             code: i32,
             msg: String,
             tenant_access_token: Option<String>,
@@ -269,6 +267,10 @@ impl FeishuChannel {
         if let Some(message) = event.event.message {
             let content: serde_json::Value = serde_json::from_str(&message.content)?;
             let text = content.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            let message_id = message.message_id.clone();
+            let chat_id = message.chat_id.clone();
+            let thread_id = message.parent_id.clone().or(message.root_id.clone());
+            let message_raw = message.clone();
 
             let sender = event.event.sender.as_ref()
                 .map(|s| SenderInfo {
@@ -299,9 +301,9 @@ impl FeishuChannel {
                 .unwrap_or_default();
 
             let channel_msg = ChannelMessage {
-                id: message.message_id,
+                id: message_id,
                 channel_name: self.name.clone(),
-                channel_id: message.chat_id,
+                channel_id: chat_id,
                 sender,
                 content: MessageContent {
                     text: text.to_string(),
@@ -309,9 +311,9 @@ impl FeishuChannel {
                     attachments: Vec::new(),
                 },
                 timestamp: Utc::now(),
-                thread_id: message.parent_id.or(message.root_id),
+                thread_id,
                 mentions_bot: true,
-                raw: serde_json::to_value(&event)?,
+                raw: serde_json::to_value(&message_raw)?,
             };
 
             tx.send(channel_msg).await?;

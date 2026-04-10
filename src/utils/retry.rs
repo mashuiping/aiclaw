@@ -1,7 +1,7 @@
 //! Retry utilities with exponential backoff
 
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Retry configuration
 #[derive(Debug, Clone)]
@@ -191,13 +191,15 @@ impl CircuitBreaker {
         }
     }
 
-    /// Check if request can proceed
-    pub fn can_proceed(&self) -> bool {
+    /// Check if request can proceed. When the cooldown after an open circuit has passed,
+    /// transitions `Open` → `HalfOpen` so the next call can probe the dependency.
+    pub fn can_proceed(&mut self) -> bool {
         match self.state {
             CircuitState::Closed => true,
             CircuitState::Open => {
                 if let Some(next) = self.next_attempt {
                     if std::time::Instant::now() >= next {
+                        self.state = CircuitState::HalfOpen;
                         true
                     } else {
                         false
@@ -262,8 +264,6 @@ impl CircuitBreaker {
     }
 }
 
-use std::time::Duration;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_initial_state() {
-        let cb = CircuitBreaker::new(3, 2);
+        let mut cb = CircuitBreaker::new(3, 2);
         assert_eq!(cb.state, CircuitState::Closed);
         assert!(cb.can_proceed());
     }

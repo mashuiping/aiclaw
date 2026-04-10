@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Role types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -207,7 +207,10 @@ impl RBACValidator {
             return RBACResult::Allowed;
         }
 
-        let user_perms = self.role_permissions.get(&role).unwrap_or(&vec![]);
+        let user_perms = self.role_permissions.get(&role).unwrap_or_else(|| {
+            static EMPTY: Vec<Permission> = Vec::new();
+            &EMPTY
+        });
 
         for required in &required_perms {
             if !user_perms.contains(required) {
@@ -293,9 +296,11 @@ mod tests {
 
     #[test]
     fn test_role_permissions() {
-        let validator = RBACValidator::new();
+        let mut validator = RBACValidator::new();
+        validator.set_user_role("admin", Role::Admin);
+        validator.set_user_role("viewer", Role::Viewer);
 
-        // Admin can do everything
+        // Admin can do everything (including sensitive ops without extra gate here)
         assert!(validator.check_permission("admin", IntentAction::Scale).is_allowed());
 
         // Viewer can only read
@@ -309,6 +314,12 @@ mod tests {
         validator.set_user_role("user1", Role::Operator);
 
         assert_eq!(validator.get_user_role("user1"), Role::Operator);
-        assert!(validator.check_permission("user1", IntentAction::Scale).is_allowed());
+        let scale = validator.check_permission("user1", IntentAction::Scale);
+        assert!(
+            !scale.is_denied(),
+            "operator should have Scale permission: {:?}",
+            scale
+        );
+        assert!(scale.requires_confirmation());
     }
 }

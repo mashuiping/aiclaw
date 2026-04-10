@@ -35,7 +35,7 @@ impl ChannelFactory {
         let mut channels = HashMap::new();
         for (name, channel_config) in &config.channels {
             let channel = Self::create_channel(name, channel_config)?;
-            channels.insert(name.clone(), channel);
+            channels.insert(name.to_string(), channel);
         }
         Ok(channels)
     }

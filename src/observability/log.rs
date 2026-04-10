@@ -1,8 +1,8 @@
 //! Log observer implementation
 
 use super::traits::*;
+use async_trait::async_trait;
 use chrono::Utc;
-use std::time::Duration;
 
 /// LogObserver - structured logging observer
 pub struct LogObserver {

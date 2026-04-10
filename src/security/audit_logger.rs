@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::fmt;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -18,6 +18,21 @@ pub enum AuditEventType {
     SkillExecution,
     MCPInvocation,
     Error,
+}
+
+impl fmt::Display for AuditEventType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AuditEventType::CommandExecution => write!(f, "CommandExecution"),
+            AuditEventType::ConfirmationRequested => write!(f, "ConfirmationRequested"),
+            AuditEventType::ConfirmationReceived => write!(f, "ConfirmationReceived"),
+            AuditEventType::BlockedCommand => write!(f, "BlockedCommand"),
+            AuditEventType::IntentClassification => write!(f, "IntentClassification"),
+            AuditEventType::SkillExecution => write!(f, "SkillExecution"),
+            AuditEventType::MCPInvocation => write!(f, "MCPInvocation"),
+            AuditEventType::Error => write!(f, "Error"),
+        }
+    }
 }
 
 /// Audit event
@@ -120,10 +135,13 @@ impl AuditLogger {
 
     /// Log an audit event
     pub fn log(&self, event: AuditEvent) {
-        let event_str = serde_json::to_string(&event).unwrap_or_default();
+        let _event_str = serde_json::to_string(&event).unwrap_or_default();
+        let event_type = event.event_type.clone();
+        let user_id = event.user_id.clone();
+        let command = event.command.clone();
         match self.sender.try_send(event) {
             Ok(_) => {
-                info!("AUDIT: {} - {} - {}", event.event_type, event.user_id, event.command.as_deref().unwrap_or("N/A"));
+                info!("AUDIT: {} - {} - {}", event_type, user_id, command.as_deref().unwrap_or("N/A"));
             }
             Err(e) => {
                 warn!("Failed to send audit event: {}", e);

@@ -1,7 +1,6 @@
 //! Command whitelist validator
 
 use std::collections::HashSet;
-use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Command validation result
@@ -28,6 +27,7 @@ pub struct CommandValidator {
     /// Commands that require explicit confirmation
     confirmation_required: Vec<String>,
     /// Sensitive operations
+    #[allow(dead_code)]
     sensitive_keywords: HashSet<String>,
     /// Dangerous commands that are always blocked
     blocked_commands: HashSet<String>,
@@ -40,6 +40,7 @@ struct CommandPattern {
     /// Allowed subcommands (e.g., ["get", "logs", "describe"])
     allowed_subcommands: Vec<String>,
     /// Allowed resource types for this command
+    #[allow(dead_code)]
     allowed_resources: Vec<String>,
 }
 
@@ -54,6 +55,7 @@ impl CommandValidator {
     }
 
     /// Add an allowed kubectl pattern
+    #[allow(dead_code)]
     pub fn add_kubectl_pattern(
         mut self,
         subcommands: Vec<String>,
@@ -189,6 +191,7 @@ impl Default for CommandValidator {
                     "namespace".to_string(),
                     "config".to_string(),
                     "explain".to_string(),
+                    "delete".to_string(),
                 ],
                 vec![
                     "pods".to_string(),

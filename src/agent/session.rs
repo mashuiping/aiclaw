@@ -86,21 +86,22 @@ impl SessionManager {
 
     /// Update session activity
     pub fn touch(&self, session_id: &str) -> Option<Arc<Session>> {
-        if let Some(mut entry) = self.sessions.get_mut(session_id) {
-            entry.last_activity = Utc::now();
-            return Some(entry.value().clone());
-        }
-        None
+        self.sessions.get_mut(session_id).map(|mut r| {
+            let arc = r.value_mut();
+            Arc::make_mut(arc).last_activity = Utc::now();
+            arc.clone()
+        })
     }
 
     /// Update session state
     pub fn update_state(&self, session_id: &str, state: SessionState) -> Option<Arc<Session>> {
-        if let Some(mut entry) = self.sessions.get_mut(session_id) {
-            entry.state = state;
-            entry.last_activity = Utc::now();
-            return Some(entry.value().clone());
-        }
-        None
+        self.sessions.get_mut(session_id).map(|mut r| {
+            let arc = r.value_mut();
+            let session = Arc::make_mut(arc);
+            session.state = state;
+            session.last_activity = Utc::now();
+            arc.clone()
+        })
     }
 
     /// Add interaction to session
@@ -112,7 +113,9 @@ impl SessionManager {
         result: Option<&str>,
         success: bool,
     ) -> Option<Arc<Session>> {
-        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+        self.sessions.get_mut(session_id).map(|mut r| {
+            let arc = r.value_mut();
+            let session = Arc::make_mut(arc);
             let record = InteractionRecord {
                 timestamp: Utc::now(),
                 intent: intent.to_string(),
@@ -121,13 +124,11 @@ impl SessionManager {
                 success,
             };
 
-            entry.context.history.push(record);
-            entry.context.last_skill = skill.map(String::from);
-            entry.last_activity = Utc::now();
-
-            return Some(entry.value().clone());
-        }
-        None
+            session.context.history.push(record);
+            session.context.last_skill = skill.map(String::from);
+            session.last_activity = Utc::now();
+            arc.clone()
+        })
     }
 
     /// Add a message to conversation history
@@ -137,27 +138,28 @@ impl SessionManager {
         role: MessageRole,
         content: String,
     ) -> Option<Arc<Session>> {
-        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+        self.sessions.get_mut(session_id).map(|mut r| {
+            let arc = r.value_mut();
+            let session = Arc::make_mut(arc);
             let message = ChatMessage {
                 role,
                 content,
                 timestamp: Utc::now(),
             };
 
-            entry.context.conversation_history.push(message);
+            session.context.conversation_history.push(message);
 
             // Trim history if too long
-            if entry.context.conversation_history.len() > MAX_CONVERSATION_HISTORY {
-                entry.context.conversation_history =
-                    entry.context.conversation_history.split_off(
-                        entry.context.conversation_history.len() - MAX_CONVERSATION_HISTORY
+            if session.context.conversation_history.len() > MAX_CONVERSATION_HISTORY {
+                session.context.conversation_history =
+                    session.context.conversation_history.split_off(
+                        session.context.conversation_history.len() - MAX_CONVERSATION_HISTORY
                     );
             }
 
-            entry.last_activity = Utc::now();
-            return Some(entry.value().clone());
-        }
-        None
+            session.last_activity = Utc::now();
+            arc.clone()
+        })
     }
 
     /// Get conversation history for a session
@@ -171,42 +173,46 @@ impl SessionManager {
 
     /// Set pending clarification question
     pub fn set_pending_question(&self, session_id: &str, question: String) -> Option<Arc<Session>> {
-        if let Some(mut entry) = self.sessions.get_mut(session_id) {
-            entry.context.pending_question = Some(question);
-            entry.last_activity = Utc::now();
-            return Some(entry.value().clone());
-        }
-        None
+        self.sessions.get_mut(session_id).map(|mut r| {
+            let arc = r.value_mut();
+            let session = Arc::make_mut(arc);
+            session.context.pending_question = Some(question);
+            session.last_activity = Utc::now();
+            arc.clone()
+        })
     }
 
     /// Clear pending question
     pub fn clear_pending_question(&self, session_id: &str) -> Option<Arc<Session>> {
-        if let Some(mut entry) = self.sessions.get_mut(session_id) {
-            entry.context.pending_question = None;
-            entry.last_activity = Utc::now();
-            return Some(entry.value().clone());
-        }
-        None
+        self.sessions.get_mut(session_id).map(|mut r| {
+            let arc = r.value_mut();
+            let session = Arc::make_mut(arc);
+            session.context.pending_question = None;
+            session.last_activity = Utc::now();
+            arc.clone()
+        })
     }
 
     /// Set current cluster context
     pub fn set_current_cluster(&self, session_id: &str, cluster: String) -> Option<Arc<Session>> {
-        if let Some(mut entry) = self.sessions.get_mut(session_id) {
-            entry.context.current_cluster = Some(cluster);
-            entry.last_activity = Utc::now();
-            return Some(entry.value().clone());
-        }
-        None
+        self.sessions.get_mut(session_id).map(|mut r| {
+            let arc = r.value_mut();
+            let session = Arc::make_mut(arc);
+            session.context.current_cluster = Some(cluster);
+            session.last_activity = Utc::now();
+            arc.clone()
+        })
     }
 
     /// Set current namespace context
     pub fn set_current_namespace(&self, session_id: &str, namespace: String) -> Option<Arc<Session>> {
-        if let Some(mut entry) = self.sessions.get_mut(session_id) {
-            entry.context.current_namespace = Some(namespace);
-            entry.last_activity = Utc::now();
-            return Some(entry.value().clone());
-        }
-        None
+        self.sessions.get_mut(session_id).map(|mut r| {
+            let arc = r.value_mut();
+            let session = Arc::make_mut(arc);
+            session.context.current_namespace = Some(namespace);
+            session.last_activity = Utc::now();
+            arc.clone()
+        })
     }
 
     /// Clean up expired sessions
@@ -226,7 +232,7 @@ impl SessionManager {
 
         for session_id in expired {
             if let Some((_, entry)) = self.sessions.remove(&session_id) {
-                if let Some(sessions) = self.user_sessions.get_mut(&entry.user_id) {
+                if let Some(mut sessions) = self.user_sessions.get_mut(&entry.user_id) {
                     sessions.retain(|s| s != &session_id);
                 }
                 removed += 1;

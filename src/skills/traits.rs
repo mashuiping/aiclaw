@@ -26,8 +26,8 @@ pub trait Skill: Send + Sync {
     }
 
     /// Get skill prompts
-    fn prompts(&self) -> &SkillPrompts {
-        &SkillPrompts::default()
+    fn prompts(&self) -> SkillPrompts {
+        SkillPrompts::default()
     }
 
     /// Execute the skill

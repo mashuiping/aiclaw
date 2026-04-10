@@ -9,6 +9,7 @@ use tracing::debug;
 pub struct SkillRegistry {
     skills: DashMap<String, Arc<SkillMetadata>>,
     tags_index: DashMap<String, Vec<String>>,
+    domain_tags_index: DashMap<String, Vec<String>>,
 }
 
 impl SkillRegistry {
@@ -16,6 +17,7 @@ impl SkillRegistry {
         Self {
             skills: DashMap::new(),
             tags_index: DashMap::new(),
+            domain_tags_index: DashMap::new(),
         }
     }
 
@@ -24,6 +26,7 @@ impl SkillRegistry {
         let name = skill.name.clone();
         self.skills.insert(name.clone(), Arc::new(skill.clone()));
 
+        // Index by tags
         for tag in &skill.tags {
             let tag_lower = tag.to_lowercase();
             self.tags_index
@@ -32,7 +35,16 @@ impl SkillRegistry {
                 .push(name.clone());
         }
 
-        debug!("Registered skill: {}", skill.name);
+        // Index by domain tags (hami, gpu, apisix, coredns, etc.)
+        for domain_tag in &skill.domain_tags {
+            let tag_lower = domain_tag.to_lowercase();
+            self.domain_tags_index
+                .entry(tag_lower)
+                .or_insert_with(Vec::new)
+                .push(name.clone());
+        }
+
+        debug!("Registered skill: {} (domain_tags: {:?})", skill.name, skill.domain_tags);
     }
 
     /// Get a skill by name
@@ -50,7 +62,7 @@ impl SkillRegistry {
         let query_lower = query.to_lowercase();
         let query_parts: Vec<&str> = query_lower.split_whitespace().collect();
 
-        let mut scored: Vec<(&str, i32)> = Vec::new();
+        let mut scored: Vec<(String, i32)> = Vec::new();
 
         for entry in self.skills.iter() {
             let skill = entry.value();
@@ -71,10 +83,16 @@ impl SkillRegistry {
                         score += 3;
                     }
                 }
+                // Also search domain_tags
+                for domain_tag in &skill.domain_tags {
+                    if domain_tag.to_lowercase().contains(part) {
+                        score += 4; // Slightly higher weight for domain tags
+                    }
+                }
             }
 
             if score > 0 {
-                scored.push((skill.name.as_str(), score));
+                scored.push((skill.name.clone(), score));
             }
         }
 
@@ -82,7 +100,7 @@ impl SkillRegistry {
 
         scored
             .into_iter()
-            .filter_map(|(name, _)| self.get(name))
+            .filter_map(|(name, _)| self.get(&name))
             .collect()
     }
 
@@ -90,6 +108,19 @@ impl SkillRegistry {
     pub fn get_by_tag(&self, tag: &str) -> Vec<Arc<SkillMetadata>> {
         let tag_lower = tag.to_lowercase();
         if let Some(names) = self.tags_index.get(&tag_lower) {
+            names
+                .iter()
+                .filter_map(|name| self.get(name))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get skills by domain tag (hami, gpu, apisix, coredns, etc.)
+    pub fn get_by_domain_tag(&self, domain_tag: &str) -> Vec<Arc<SkillMetadata>> {
+        let tag_lower = domain_tag.to_lowercase();
+        if let Some(names) = self.domain_tags_index.get(&tag_lower) {
             names
                 .iter()
                 .filter_map(|name| self.get(name))
@@ -135,6 +166,26 @@ impl std::fmt::Debug for SkillRegistry {
         f.debug_struct("SkillRegistry")
             .field("skill_count", &self.skills.len())
             .field("tag_count", &self.tags_index.len())
+            .field("domain_tag_count", &self.domain_tags_index.len())
             .finish()
+    }
+}
+
+// Implement SkillRegistryAccess trait for Router
+impl crate::agent::router::SkillRegistryAccess for SkillRegistry {
+    fn search(&self, query: &str) -> Vec<std::sync::Arc<aiclaw_types::skill::SkillMetadata>> {
+        self.search(query)
+    }
+
+    fn get_by_tag(&self, tag: &str) -> Vec<std::sync::Arc<aiclaw_types::skill::SkillMetadata>> {
+        self.get_by_tag(tag)
+    }
+
+    fn get_by_domain_tag(&self, domain_tag: &str) -> Vec<std::sync::Arc<aiclaw_types::skill::SkillMetadata>> {
+        self.get_by_domain_tag(domain_tag)
+    }
+
+    fn get_always(&self) -> Vec<std::sync::Arc<aiclaw_types::skill::SkillMetadata>> {
+        self.get_always()
     }
 }

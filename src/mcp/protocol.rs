@@ -1,8 +1,7 @@
 //! MCP protocol types and helpers
 
 use aiclaw_types::mcp::{
-    JSONRPCError, JSONRPCRequest, JSONRPCResponse, MCPServerInfo, MCPMessage,
-    PromptArgument, PromptInfo, ResourceInfo, ToolInfo,
+    JSONRPCError, JSONRPCRequest, JSONRPCResponse, MCPServerInfo, ResourceInfo, ToolInfo,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -55,12 +54,6 @@ impl RequestBuilder {
     }
 }
 
-impl JSONRPCRequest {
-    pub fn builder(method: impl Into<String>) -> RequestBuilder {
-        RequestBuilder::new(method)
-    }
-}
-
 /// Parse a JSON-RPC response
 pub fn parse_response(response_body: &[u8]) -> anyhow::Result<JSONRPCResponse> {
     serde_json::from_slice(response_body).map_err(|e| anyhow::anyhow!("Failed to parse JSON-RPC response: {}", e))
@@ -87,7 +80,7 @@ pub fn create_initialize_request(client_name: &str, client_version: &str) -> JSO
         }
     });
 
-    JSONRPCRequest::builder(methods::INITIALIZE)
+    RequestBuilder::new(methods::INITIALIZE)
         .with_params(params)
         .with_id(Value::String("1".to_string()))
         .build()
@@ -95,7 +88,7 @@ pub fn create_initialize_request(client_name: &str, client_version: &str) -> JSO
 
 /// Create a tools/list request
 pub fn create_list_tools_request() -> JSONRPCRequest {
-    JSONRPCRequest::builder(methods::TOOLS_LIST)
+    RequestBuilder::new(methods::TOOLS_LIST)
         .with_id(Value::String("2".to_string()))
         .build()
 }
@@ -107,7 +100,7 @@ pub fn create_call_tool_request(tool_name: &str, arguments: HashMap<String, Valu
         "arguments": arguments
     });
 
-    JSONRPCRequest::builder(methods::TOOLS_CALL)
+    RequestBuilder::new(methods::TOOLS_CALL)
         .with_params(params)
         .with_id(Value::String("3".to_string()))
         .build()
@@ -115,14 +108,14 @@ pub fn create_call_tool_request(tool_name: &str, arguments: HashMap<String, Valu
 
 /// Create a resources/list request
 pub fn create_list_resources_request() -> JSONRPCRequest {
-    JSONRPCRequest::builder(methods::RESOURCES_LIST)
+    RequestBuilder::new(methods::RESOURCES_LIST)
         .with_id(Value::String("4".to_string()))
         .build()
 }
 
 /// Create a shutdown request
 pub fn create_shutdown_request() -> JSONRPCRequest {
-    JSONRPCRequest::builder(methods::SHUTDOWN)
+    RequestBuilder::new(methods::SHUTDOWN)
         .with_id(Value::String("5".to_string()))
         .build()
 }

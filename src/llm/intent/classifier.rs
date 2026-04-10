@@ -51,7 +51,7 @@ impl IntentClassifierImpl {
 
         // Try to find JSON directly
         if content.starts_with('{') {
-            Some(content.to_string())
+            return Some(content.to_string());
         } else if let Some(start) = content.find('{') {
             let remaining = &content[start..];
             // Find matching closing brace
@@ -72,7 +72,7 @@ impl IntentClassifierImpl {
     }
 
     fn fallback_classify(message: &str) -> IntentClassification {
-        // Simple rule-based fallback
+        // Simple rule-based fallback with domain awareness
         let message_lower = message.to_lowercase();
 
         let (intent_type, confidence) = if message_lower.contains("日志")
@@ -95,6 +95,7 @@ impl IntentClassifierImpl {
             || message_lower.contains("debug")
             || message_lower.contains("问题")
             || message_lower.contains("为什么")
+            || message_lower.contains("诊断")
         {
             ("Debug", 0.6)
         } else if message_lower.contains("查询")
@@ -115,10 +116,47 @@ impl IntentClassifierImpl {
             ("Unknown", 0.3)
         };
 
+        // Extract domain entities
+        let mut entities = IntentEntities::default();
+
+        // Domain detection
+        if message_lower.contains("gpu") || message_lower.contains("nvidia") {
+            entities.domain = Some("gpu".to_string());
+        } else if message_lower.contains("storage") || message_lower.contains("pvc") {
+            entities.domain = Some("storage".to_string());
+        } else if message_lower.contains("network") || message_lower.contains("网络") {
+            entities.domain = Some("network".to_string());
+        }
+
+        // Virtualization detection
+        if message_lower.contains("hami") {
+            entities.virtualization = Some("hami".to_string());
+        } else if message_lower.contains("vgpu") {
+            entities.virtualization = Some("vgpu".to_string());
+        }
+
+        // Resource state detection
+        if message_lower.contains("pending") || message_lower.contains("等待") {
+            entities.resource_state = Some("pending".to_string());
+        } else if message_lower.contains("crashloop") {
+            entities.resource_state = Some("crashloop".to_string());
+        } else if message_lower.contains("oom") || message_lower.contains("内存") {
+            entities.resource_state = Some("oom".to_string());
+        }
+
+        // Error keyword detection
+        if message_lower.contains("502") {
+            entities.error_keyword = Some("502".to_string());
+        } else if message_lower.contains("500") {
+            entities.error_keyword = Some("500".to_string());
+        } else if message_lower.contains("404") {
+            entities.error_keyword = Some("404".to_string());
+        }
+
         IntentClassification {
             intent_type: intent_type.to_string(),
             confidence,
-            entities: IntentEntities::default(),
+            entities,
             reasoning: Some("Fallback classification based on keywords".to_string()),
         }
     }

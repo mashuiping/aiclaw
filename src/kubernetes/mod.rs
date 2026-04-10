@@ -30,7 +30,7 @@ impl K8sClientFactory {
         for (name, config) in configs {
             if config.enabled {
                 let client = Self::create(name, config)?;
-                clients.insert(name.clone(), client);
+                clients.insert(name.to_string(), client);
             }
         }
         Ok(clients)

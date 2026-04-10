@@ -2,7 +2,6 @@
 
 use aiclaw_types::agent::{Intent, IntentEntities, IntentType};
 use regex::Regex;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -212,7 +211,7 @@ impl IntentParser {
 
     /// Calculate confidence score
     fn calculate_confidence(&self, message: &str, pattern: &IntentPattern) -> f32 {
-        let mut confidence = 0.5;
+        let mut confidence: f32 = 0.5;
 
         for keyword in &pattern.keywords {
             if message.contains(&keyword.to_lowercase()) {

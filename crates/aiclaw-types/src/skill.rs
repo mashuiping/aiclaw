@@ -12,6 +12,15 @@ pub struct SkillMetadata {
     pub author: Option<String>,
     pub tags: Vec<String>,
     pub always: bool,
+    /// Full markdown content for LLM to understand and execute
+    #[serde(default)]
+    pub raw_content: String,
+    /// Scenarios/conditions where this skill applies
+    #[serde(default)]
+    pub applicability: Vec<String>,
+    /// Domain-specific tags for routing (gpu, hami, apisix, coredns, etc.)
+    #[serde(default)]
+    pub domain_tags: Vec<String>,
 }
 
 /// Skill tool definition
@@ -85,7 +94,7 @@ pub struct SkillContext {
     pub session_id: Option<String>,
 }
 
-/// Skill manifest (from SKILL.toml)
+/// Skill manifest (from SKILL.toml or parsed from SKILL.md)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillManifest {
     pub name: String,
@@ -102,6 +111,15 @@ pub struct SkillManifest {
     pub prompts: SkillPrompts,
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// Full markdown content (for SKILL.md)
+    #[serde(default)]
+    pub raw_content: String,
+    /// Applicability scenarios (for SKILL.md)
+    #[serde(default)]
+    pub applicability: Vec<String>,
+    /// Domain tags (for SKILL.md)
+    #[serde(default)]
+    pub domain_tags: Vec<String>,
 }
 
 impl SkillManifest {
@@ -113,6 +131,9 @@ impl SkillManifest {
             author: self.author,
             tags: self.tags,
             always: self.always,
+            raw_content: self.raw_content,
+            applicability: self.applicability,
+            domain_tags: self.domain_tags,
         }
     }
 }

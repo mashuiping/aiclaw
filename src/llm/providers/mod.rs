@@ -14,7 +14,6 @@ pub use openai::OpenAIProvider;
 pub use qwen::QwenProvider;
 pub use zhipu::ZhipuProvider;
 
-use crate::llm::factory::ProviderConfig;
 
 /// Parse environment variable from config string
 /// Supports ${VAR_NAME} syntax

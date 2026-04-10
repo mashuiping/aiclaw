@@ -109,6 +109,7 @@ pub enum IntentType {
 /// Intent entities extracted from user message
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IntentEntities {
+    // Standard K8s entities
     #[serde(default)]
     pub namespace: Option<String>,
     #[serde(default)]
@@ -120,11 +121,24 @@ pub struct IntentEntities {
     #[serde(default)]
     pub cluster: Option<String>,
     #[serde(default)]
+    pub node_name: Option<String>,
+    #[serde(default)]
     pub time_range: Option<String>,
     #[serde(default)]
     pub query: Option<String>,
     #[serde(default)]
     pub labels: std::collections::HashMap<String, String>,
+    // Domain-specific entities
+    #[serde(default)]
+    pub domain: Option<String>,              // gpu, storage, network, database
+    #[serde(default)]
+    pub virtualization: Option<String>,         // hami, vgpu, time-slicing, gpushare
+    #[serde(default)]
+    pub kubernetes_resource: Option<String>, // pod, deployment, statefulset, daemonset, job
+    #[serde(default)]
+    pub resource_state: Option<String>,      // pending, crashloop, error, oom, running
+    #[serde(default)]
+    pub error_keyword: Option<String>,       // 502, 500, 404, oom, crashloop
 }
 
 /// Agent response

@@ -1,13 +1,13 @@
 //! Skill executor - executes skills and their tools
 
-use aiclaw_types::skill::{SkillContext, SkillTool, ToolKind, ToolResult};
+use aiclaw_types::skill::{SkillTool, ToolKind, ToolResult};
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
-use crate::security::command_validator::{CommandValidator, ValidationResult};
+use crate::security::command_validator::CommandValidator;
 
 /// Skill executor - executes tools defined in skills
 pub struct SkillExecutor {
@@ -231,7 +231,8 @@ impl SkillExecutor {
 
         let duration = start.elapsed();
 
-        let success = response.status().is_success();
+        let status = response.status();
+        let success = status.is_success();
         let body = response.text().await.unwrap_or_default();
 
         Ok(ToolResult {
@@ -239,7 +240,7 @@ impl SkillExecutor {
             success,
             output: if success { Some(body.clone()) } else { None },
             error: if !success {
-                Some(format!("HTTP {}: {}", response.status(), body))
+                Some(format!("HTTP {}: {}", status, body))
             } else {
                 None
             },
@@ -260,7 +261,7 @@ impl SkillExecutor {
         let mut cmd = tokio::process::Command::new(&script_path);
         cmd.envs(&tool.env);
 
-        for (key, value) in &tool.args {
+        for (_key, value) in &tool.args {
             cmd.arg(self.interpolate(value, args));
         }
 

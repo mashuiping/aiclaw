@@ -1,18 +1,15 @@
 //! MCP client implementation
 
-use aiclaw_types::mcp::{MCPServerInfo, ToolInfo};
-use async_trait::async_trait;
-use jsonrpc_core::{params, types::request::JSONRPCRequest};
-use parking_lot::RwLock;
+use aiclaw_types::mcp::{JSONRPCRequest, JSONRPCResponse, MCPServerInfo, ToolInfo};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::RwLock as TokioRwLock;
+use tracing::{debug, error, info};
 
-use super::protocol::{self, methods};
+use super::protocol::{self};
 
 /// MCP client errors
 #[derive(Debug, thiserror::Error)]
@@ -39,22 +36,22 @@ pub enum MCPError {
 /// MCP client for connecting to MCP servers
 pub struct MCPClient {
     name: String,
-    server_info: RwLock<Option<MCPServerInfo>>,
-    tools: RwLock<Vec<ToolInfo>>,
-    process: RwLock<Option<Child>>,
-    stdin: Arc<RwLock<Option<tokio::process::ChildStdin>>>,
-    stdout: Arc<RwLock<Option<tokio::process::ChildStdout>>>,
+    server_info: TokioRwLock<Option<MCPServerInfo>>,
+    tools: TokioRwLock<Vec<ToolInfo>>,
+    process: TokioRwLock<Option<Child>>,
+    stdin: Arc<TokioRwLock<Option<tokio::process::ChildStdin>>>,
+    stdout: Arc<TokioRwLock<Option<tokio::process::ChildStdout>>>,
 }
 
 impl MCPClient {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            server_info: RwLock::new(None),
-            tools: RwLock::new(Vec::new()),
-            process: RwLock::new(None),
-            stdin: Arc::new(RwLock::new(None)),
-            stdout: Arc::new(RwLock::new(None)),
+            server_info: TokioRwLock::new(None),
+            tools: TokioRwLock::new(Vec::new()),
+            process: TokioRwLock::new(None),
+            stdin: Arc::new(TokioRwLock::new(None)),
+            stdout: Arc::new(TokioRwLock::new(None)),
         }
     }
 
@@ -65,17 +62,17 @@ impl MCPClient {
         let mut cmd = Command::new(command);
         cmd.args(args)
             .envs(env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
             .kill_on_drop(true);
 
         let mut child = cmd.spawn()?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
 
-        *self.stdin.write() = stdin;
-        *self.stdout.write() = stdout;
-        *self.process.write() = Some(child);
+        *self.stdin.write().await = stdin;
+        *self.stdout.write().await = stdout;
+        *self.process.write().await = Some(child);
 
         self.initialize().await?;
 
@@ -97,7 +94,7 @@ impl MCPClient {
             .ok_or_else(|| anyhow::anyhow!("No result in initialize response"))?;
 
         let server_info = protocol::parse_server_info(&result)?;
-        *self.server_info.write() = Some(server_info);
+        *self.server_info.write().await = Some(server_info);
 
         self.list_tools().await?;
 
@@ -105,14 +102,14 @@ impl MCPClient {
     }
 
     /// Send a JSON-RPC request
-    async fn send_request(&self, request: JSONRPCRequest) -> anyhow::Result<protocol::JSONRPCResponse> {
-        let stdin_guard = self.stdin.read();
-        let stdout_guard = self.stdout.read();
+    async fn send_request(&self, request: JSONRPCRequest) -> anyhow::Result<JSONRPCResponse> {
+        let mut stdin_guard = self.stdin.write().await;
+        let mut stdout_guard = self.stdout.write().await;
 
-        let stdin = stdin_guard.as_ref()
+        let stdin = stdin_guard.as_mut()
             .ok_or_else(|| anyhow::anyhow!("MCP stdin not available"))?;
 
-        let mut stdout = stdout_guard.as_ref()
+        let stdout = stdout_guard.as_mut()
             .ok_or_else(|| anyhow::anyhow!("MCP stdout not available"))?;
 
         let request_json = serde_json::to_string(&request)?;
@@ -120,13 +117,15 @@ impl MCPClient {
 
         debug!("Sending MCP request: {}", request.method);
 
-        use tokio::io::AsyncWriteExt;
         stdin.write_all(request_line.as_bytes()).await?;
 
         let mut response_line = String::new();
-        stdout.read_line(&mut response_line).await?;
+        BufReader::new(stdout)
+            .read_line(&mut response_line)
+            .await?;
+        let response_line = response_line.trim_end_matches(['\r', '\n']);
 
-        let response: protocol::JSONRPCResponse = serde_json::from_str(&response_line)?;
+        let response: JSONRPCResponse = serde_json::from_str(response_line)?;
 
         debug!("Received MCP response for {}", request.method);
 
@@ -146,14 +145,14 @@ impl MCPClient {
             .ok_or_else(|| anyhow::anyhow!("No result in list_tools response"))?;
 
         let tools = protocol::parse_tool_info(&result)?;
-        *self.tools.write() = tools.clone();
+        *self.tools.write().await = tools.clone();
 
         Ok(tools)
     }
 
     /// Call a tool on the server
     pub async fn call_tool(&self, tool_name: &str, arguments: HashMap<String, Value>) -> anyhow::Result<Value> {
-        let tools = self.tools.read();
+        let tools = self.tools.read().await;
         if !tools.iter().any(|t| t.name == tool_name) {
             return Err(anyhow::anyhow!("Tool not found: {}", tool_name).into());
         }
@@ -172,17 +171,17 @@ impl MCPClient {
 
     /// Get server info
     pub fn server_info(&self) -> Option<MCPServerInfo> {
-        self.server_info.read().clone()
+        self.server_info.try_read().ok().and_then(|g| g.clone())
     }
 
     /// Get cached tools
     pub fn cached_tools(&self) -> Vec<ToolInfo> {
-        self.tools.read().clone()
+        self.tools.try_read().ok().map(|g| g.clone()).unwrap_or_default()
     }
 
     /// Health check
     pub async fn health_check(&self) -> bool {
-        if self.process.read().is_none() {
+        if self.process.read().await.is_none() {
             return false;
         }
 
@@ -198,12 +197,12 @@ impl MCPClient {
         let request = protocol::create_shutdown_request();
         let _ = self.send_request(request).await;
 
-        if let Some(mut child) = self.process.write().take() {
-            let _ = child.kill().await;
+        if let Some(mut child) = self.process.write().await.take() {
+            let _ = child.kill();
         }
 
-        *self.stdin.write() = None;
-        *self.stdout.write() = None;
+        *self.stdin.write().await = None;
+        *self.stdout.write().await = None;
 
         info!("MCP server {} shutdown", self.name);
         Ok(())
@@ -212,8 +211,11 @@ impl MCPClient {
 
 impl Drop for MCPClient {
     fn drop(&mut self) {
-        if let Some(mut child) = self.process.write().take() {
-            let _ = child.kill();
+        // Use try_write because we can't block in Drop
+        if let Ok(mut guard) = self.process.try_write() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+            }
         }
     }
 }

@@ -9,7 +9,7 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
         return None;
     }
 
-    let (value, unit) = s[..s.len()-1].parse::<i64>().ok()?;
+    let value = s[..s.len()-1].parse::<i64>().ok()?;
 
     match s.chars().last()? {
         's' => Some(Duration::seconds(value)),

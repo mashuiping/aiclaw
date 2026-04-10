@@ -41,7 +41,7 @@ impl AIOpsProviderFactory {
         for (name, config) in configs {
             if config.enabled {
                 let provider = Self::create(name, &config)?;
-                providers.insert(name.clone(), provider);
+                providers.insert(name.to_string(), provider);
             }
         }
         Ok(providers)

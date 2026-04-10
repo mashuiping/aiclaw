@@ -2,12 +2,11 @@
 
 use async_trait::async_trait;
 use aiclaw_types::channel::{
-    Attachment, ChannelMessage, FormattedMessage, Mention, MentionType,
+    ChannelMessage,
     MessageContent, MessageFormat, OutgoingContent, SendMessage, SenderInfo,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -172,10 +171,11 @@ impl WeComChannel {
         message: WeComIncomingMessage,
         tx: &mpsc::Sender<ChannelMessage>,
     ) -> anyhow::Result<()> {
+        let msg_clone = message.clone();
         let channel_msg = ChannelMessage {
             id: message.msg_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             channel_name: self.name.clone(),
-            channel_id: message.chat_id.unwrap_or_default(),
+            channel_id: message.chat_id.clone().unwrap_or_default(),
             sender: SenderInfo {
                 user_id: message.from_username.clone(),
                 username: message.from_username.clone(),
@@ -190,7 +190,7 @@ impl WeComChannel {
             timestamp: Utc::now(),
             thread_id: None,
             mentions_bot: true,
-            raw: serde_json::to_value(&message)?,
+            raw: serde_json::to_value(&msg_clone)?,
         };
 
         tx.send(channel_msg).await?;

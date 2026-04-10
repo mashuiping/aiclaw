@@ -3,11 +3,11 @@
 //! Main entry point for the AI operations agent.
 
 use aiclaw::{
-    AgentOrchestrator, AIOpsProviderFactory, ChannelFactory, Config,
-    K8sClientFactory, MCPClient, MCPClientPool, ObservabilityConfig, Observer,
-    SkillLoader, SkillRegistry, SessionManager,
+    channels::Channel, AgentOrchestrator, AIOpsProviderFactory, ChannelFactory, Config,
+    K8sClientFactory, MCPClient, MCPClientPool, Observer, SkillLoader, SkillRegistry, SessionManager,
 };
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
@@ -32,9 +32,20 @@ AI Ops Agent v{}
 
     info!("Starting AIClaw AI Ops Agent");
 
-    let config = Config::load_or_default(None)?;
+    let config_path = std::env::var_os("AICLAW_CONFIG")
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .or_else(|| {
+            dirs::home_dir().map(|h| h.join(".aiclaw").join("config.toml"))
+        })
+        .filter(|p| p.exists());
 
-    info!("Configuration loaded");
+    let config = match config_path {
+        Some(ref p) => Config::load(p)?,
+        None => Config::load_or_default(None)?,
+    };
+
+    info!("Configuration loaded (file={:?})", config_path);
 
     let observer: Arc<dyn Observer> = Arc::new(aiclaw::LogObserver::new("aiclaw"));
 
@@ -55,7 +66,7 @@ AI Ops Agent v{}
 
     let session_manager = Arc::new(SessionManager::new(config.agent.session_timeout_secs));
 
-    let mcp_pool = Arc::new(MCPClientPool::new());
+    let mut mcp_pool = MCPClientPool::new();
     for (name, server_config) in &config.mcp.servers {
         if server_config.enabled {
             let client = Arc::new(MCPClient::new(name));
@@ -70,6 +81,7 @@ AI Ops Agent v{}
             }
         }
     }
+    let mcp_pool = Arc::new(mcp_pool);
 
     let aiops_providers = AIOpsProviderFactory::create_all(&config.aiops)?;
     info!("Initialized {} AI/OPS providers", aiops_providers.len());
@@ -77,7 +89,10 @@ AI Ops Agent v{}
     let k8s_clients = K8sClientFactory::create_all(&config.kubernetes)?;
     info!("Initialized {} K8s clients", k8s_clients.len());
 
-    let channels = ChannelFactory::create_channels(&config)?;
+    let channels: HashMap<String, Arc<dyn Channel>> = ChannelFactory::create_channels(&config)?
+        .into_iter()
+        .map(|(name, ch)| (name, Arc::from(ch)))
+        .collect();
     info!("Initialized {} channels", channels.len());
 
     let (tx, rx) = mpsc::channel::<aiclaw_types::channel::ChannelMessage>(100);
@@ -101,6 +116,7 @@ AI Ops Agent v{}
     for (name, channel) in &orchestrator.channels {
         let tx_clone = tx.clone();
         let name_clone = name.clone();
+        let channel = channel.clone();
         tokio::spawn(async move {
             match channel.listen(tx_clone).await {
                 Ok(()) => info!("Channel {} listener started", name_clone),

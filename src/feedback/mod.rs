@@ -3,7 +3,6 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tracing::{debug, info};
 
 /// Feedback type
@@ -140,14 +139,14 @@ impl FeedbackCollector {
 
     /// Increment session message count
     pub fn increment_message_count(&self, session_id: &str) -> u32 {
-        let count = self.session_messages.entry(session_id.to_string()).or_insert(0);
+        let mut count = self.session_messages.entry(session_id.to_string()).or_insert(0);
         *count += 1;
         *count
     }
 
     /// Get current message index for session
     pub fn get_message_index(&self, session_id: &str) -> u32 {
-        self.session_messages.get(session_id).copied().unwrap_or(0)
+        self.session_messages.get(session_id).map(|v| *v).unwrap_or(0)
     }
 
     /// Record skill usage
@@ -231,6 +230,7 @@ impl FeedbackCollector {
                     .iter()
                     .filter(|f| f.feedback_type == FeedbackType::ThumbsDown)
                     .cloned()
+                    .collect::<Vec<_>>()
             })
             .collect();
 

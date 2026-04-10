@@ -12,7 +12,6 @@ use tracing::info;
 use super::providers::*;
 use super::routing::*;
 use super::traits::*;
-use super::types::*;
 
 /// Provider config for factory creation
 #[derive(Debug, Clone)]
@@ -129,9 +128,9 @@ impl LLMProviderFactory {
 }
 
 /// Factory for creating LLM routers
-pub struct LLM RouterFactory;
+pub struct LLMRouterFactory;
 
-impl LLM RouterFactory {
+impl LLMRouterFactory {
     /// Create a router based on routing config and providers
     pub fn create(
         router_config: &RouterConfig,

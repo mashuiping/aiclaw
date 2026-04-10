@@ -1,13 +1,13 @@
 //! Prometheus provider implementation
 
 use async_trait::async_trait;
-use aiclaw_types::aiops::{LogEntry, LogsResult, MetricValue, MetricsResult, TimeRange};
+use aiclaw_types::aiops::{LogsResult, MetricValue, MetricsResult, TimeRange};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::{debug, error};
+use tracing::debug;
 
-use super::traits::{AIOpsProvider, QueryOptions};
+use super::traits::AIOpsProvider;
 use crate::config::AIOpsProviderConfig;
 
 /// Prometheus provider
@@ -15,7 +15,7 @@ pub struct PrometheusProvider {
     name: String,
     endpoint: String,
     client: reqwest::Client,
-    timeout: Duration,
+    _timeout: Duration,
 }
 
 impl PrometheusProvider {
@@ -30,7 +30,7 @@ impl PrometheusProvider {
             name: name.to_string(),
             endpoint: config.endpoint.trim_end_matches('/').to_string(),
             client,
-            timeout,
+            _timeout: timeout,
         })
     }
 
@@ -120,9 +120,9 @@ impl PrometheusProvider {
 
             if let Some(arr) = values_array {
                 for pair in arr {
-                    if let [ts, val] = arr[..] {
-                        let timestamp = ts.as_f64().unwrap_or(0.0) as i64;
-                        let value = val.as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                    if let Some(values_slice) = pair.as_array().filter(|a| a.len() == 2).map(|a| a.as_slice()) {
+                        let timestamp = values_slice[0].as_f64().unwrap_or(0.0) as i64;
+                        let value = values_slice[1].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
 
                         values.push(MetricValue {
                             timestamp: DateTime::from_timestamp(timestamp, 0).unwrap_or_else(Utc::now),

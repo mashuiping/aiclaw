@@ -2,11 +2,8 @@
 
 use async_trait::async_trait;
 use aiclaw_types::kubernetes::{
-    Deployment, Event, EventType, InvolvedObject, K8sClientConfig, Node, NodeStatus, Pod,
-    PodStatus, Replicas, Service, ServicePort, ServiceType,
+    Deployment, Event, Node, Pod, Service,
 };
-use chrono::{DateTime, Utc};
-use std::collections::HashMap;
 
 /// K8s client trait - for Kubernetes operations
 #[async_trait]

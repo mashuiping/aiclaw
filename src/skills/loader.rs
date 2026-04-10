@@ -1,6 +1,6 @@
 //! Skill loader - loads skills from filesystem
 
-use aiclaw_types::skill::{SkillManifest, SkillMetadata, SkillTool, SkillPrompts};
+use aiclaw_types::skill::{SkillManifest, SkillMetadata, SkillTool};
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
@@ -53,10 +53,10 @@ impl SkillLoader {
         let toml_path = dir.join("SKILL.toml");
         let md_path = dir.join("SKILL.md");
 
-        if toml_path.exists() {
-            self.load_from_toml(&toml_path)
-        } else if md_path.exists() {
+        if md_path.exists() {
             self.load_from_md(&md_path)
+        } else if toml_path.exists() {
+            self.load_from_toml(&toml_path)
         } else {
             anyhow::bail!("No SKILL.toml or SKILL.md found in {:?}", dir);
         }
@@ -70,40 +70,37 @@ impl SkillLoader {
     }
 
     /// Load skill from Markdown with frontmatter
+    /// SKILL.md is preferred over SKILL.toml
     fn load_from_md(&self, path: &Path) -> anyhow::Result<SkillMetadata> {
         let content = std::fs::read_to_string(path)?;
 
-        let mut lines = content.lines();
-        let mut frontmatter_lines = Vec::new();
+        // Parse frontmatter
+        let (frontmatter, markdown_body) = extract_frontmatter(&content)
+            .ok_or_else(|| anyhow::anyhow!("No frontmatter found in {:?}", path))?;
 
-        let mut in_frontmatter = false;
-        let mut found_frontmatter = false;
-
-        for line in lines.by_ref() {
-            if line.trim() == "---" {
-                if in_frontmatter {
-                    found_frontmatter = true;
-                    break;
-                } else {
-                    in_frontmatter = true;
-                }
-            } else if in_frontmatter {
-                frontmatter_lines.push(line);
-            }
-        }
-
-        if !found_frontmatter {
-            anyhow::bail!("No frontmatter found in {:?}", path);
-        }
-
-        let frontmatter = frontmatter_lines.join("\n");
-        let manifest: SkillManifest = serde_frontmatter::parse(&frontmatter)
+        let fm: SkillFrontmatter = serde_yaml::from_str(&frontmatter)
             .map_err(|e| anyhow::anyhow!("Failed to parse frontmatter: {}", e))?;
 
-        Ok(manifest.into_metadata())
+        // Extract applicability scenarios from markdown body
+        let applicability = extract_applicability(&markdown_body);
+
+        // Extract domain tags from description and markdown
+        let domain_tags = extract_domain_tags(&fm.description, &markdown_body);
+
+        Ok(SkillMetadata {
+            name: fm.name,
+            description: fm.description,
+            version: fm.version,
+            author: fm.author,
+            tags: fm.tags,
+            always: false,
+            raw_content: content,
+            applicability,
+            domain_tags,
+        })
     }
 
-    /// Load skill tools from manifest
+    /// Load skill tools from manifest (for TOML skills)
     pub fn load_skill_tools(&self, dir: &Path) -> anyhow::Result<Vec<SkillTool>> {
         let toml_path = dir.join("SKILL.toml");
 
@@ -118,36 +115,111 @@ impl SkillLoader {
     }
 }
 
-/// Simple frontmatter parser for SKILL.md files
-mod serde_frontmatter {
-    use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
+/// Extract frontmatter and body from markdown
+fn extract_frontmatter(content: &str) -> Option<(String, String)> {
+    let lines = content.lines();
+    let mut frontmatter_lines = Vec::new();
+    let mut body_lines = Vec::new();
+    let mut in_frontmatter = false;
+    let mut found_frontmatter = false;
+    let mut past_frontmatter = false;
 
-    #[derive(Debug, Deserialize, Serialize)]
-    pub struct SkillFrontmatter {
-        pub name: String,
-        pub description: String,
-        #[serde(default)]
-        pub version: String,
-        #[serde(default)]
-        pub author: Option<String>,
-        #[serde(default)]
-        pub tags: Vec<String>,
+    for line in lines {
+        if line.trim() == "---" {
+            if in_frontmatter {
+                found_frontmatter = true;
+                in_frontmatter = false;
+                past_frontmatter = true;
+                continue;
+            } else if !past_frontmatter {
+                in_frontmatter = true;
+                continue;
+            }
+        }
+
+        if in_frontmatter {
+            frontmatter_lines.push(line);
+        } else if past_frontmatter {
+            body_lines.push(line);
+        }
     }
 
-    pub fn parse(frontmatter: &str) -> anyhow::Result<super::SkillManifest> {
-        let fm: SkillFrontmatter = serde_yaml::from_str(frontmatter)?;
-
-        Ok(super::SkillManifest {
-            name: fm.name,
-            description: fm.description,
-            version: fm.version,
-            author: fm.author,
-            tags: fm.tags,
-            always: false,
-            tools: Vec::new(),
-            prompts: super::SkillPrompts::default(),
-            dependencies: Vec::new(),
-        })
+    if found_frontmatter {
+        Some((frontmatter_lines.join("\n"), body_lines.join("\n")))
+    } else {
+        None
     }
+}
+
+/// Extract applicability scenarios from markdown body
+/// Looks for "## 适用场景" or "## Applicable Scenarios" section
+fn extract_applicability(body: &str) -> Vec<String> {
+    let mut scenarios = Vec::new();
+    let mut in_section = false;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+
+        // Check for section header
+        if trimmed == "## 适用场景" || trimmed == "## 适用场景" || trimmed.to_lowercase().contains("适用场景") {
+            in_section = true;
+            continue;
+        }
+
+        // End of section (next ## heading)
+        if in_section && trimmed.starts_with("##") {
+            break;
+        }
+
+        // Extract bullet points
+        if in_section && (trimmed.starts_with("- ") || trimmed.starts_with("* ")) {
+            // Remove the bullet and trim
+            let scenario = trimmed[2..].trim().to_string();
+            if !scenario.is_empty() {
+                scenarios.push(scenario);
+            }
+        }
+    }
+
+    scenarios
+}
+
+/// Extract domain-specific tags from description and markdown
+/// Recognizes: hami, gpu, vgpu, apisix, coredns, ingress, prometheus, etc.
+fn extract_domain_tags(description: &str, body: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+
+    let domain_keywords = [
+        "hami", "gpu", "vgpu", "nvidia", "cuda",
+        "apisix", "apigw", "gateway", "ingress", "nginx",
+        "coredns", "dns", "kubelet", "kubernetes", "k8s",
+        "prometheus", "victoriametrics", "vm", "metrics",
+        "storage", "pvc", "ceph", "nfs",
+        "network", "cilium", "istio", "linkerd",
+        "apisix", "openresty",
+        "oom", "memory", "crashloop",
+    ];
+
+    let text = format!("{} {}", description.to_lowercase(), body.to_lowercase());
+
+    for keyword in &domain_keywords {
+        if text.contains(keyword) && !tags.contains(&keyword.to_string()) {
+            tags.push(keyword.to_string());
+        }
+    }
+
+    tags
+}
+
+/// Frontmatter structure for SKILL.md
+#[derive(Debug, serde::Deserialize)]
+struct SkillFrontmatter {
+    name: String,
+    description: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    author: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
 }

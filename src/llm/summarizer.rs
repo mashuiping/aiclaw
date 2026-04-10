@@ -1,10 +1,10 @@
 //! LLM-based result summarizer
 
 use std::sync::Arc;
-use tracing::{debug, warn};
 
-use crate::llm::traits::{LLMProvider, IntentType};
-use crate::llm::types::{ChatMessage, ChatOptions, ChatResponse};
+use aiclaw_types::agent::IntentType;
+use crate::llm::traits::LLMProvider;
+use crate::llm::types::{ChatMessage, ChatOptions};
 
 /// Result summarizer - transforms raw tool output into structured, understandable responses
 pub struct Summarizer {

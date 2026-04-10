@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::intent::IntentParser;
-use super::planner::{ExecutionPlan, Planner, QueryType};
-use super::router::{Router, RouteResult, SkillRegistryAccess};
+use super::planner::{PlanStep, Planner, QueryType};
+use super::router::{Router, RouteResult};
 use super::session::SessionManager;
 use crate::aiops::AIOpsProvider;
 use crate::channels::Channel;
@@ -28,9 +28,9 @@ pub struct AgentOrchestrator {
     router: Arc<Router>,
     skill_registry: Arc<SkillRegistry>,
     mcp_pool: Arc<MCPClientPool>,
-    aiops_providers: HashMap<String, Box<dyn AIOpsProvider>>,
+    _aiops_providers: HashMap<String, Box<dyn AIOpsProvider>>,
     k8s_clients: HashMap<String, Box<dyn crate::kubernetes::K8sClient>>,
-    channels: HashMap<String, Box<dyn Channel>>,
+    pub channels: HashMap<String, Arc<dyn Channel>>,
     observer: Arc<dyn Observer>,
     summarizer: Option<Arc<Summarizer>>,
     planner: Option<Arc<Planner>>,
@@ -42,9 +42,9 @@ impl AgentOrchestrator {
         session_manager: Arc<SessionManager>,
         skill_registry: Arc<SkillRegistry>,
         mcp_pool: Arc<MCPClientPool>,
-        aiops_providers: HashMap<String, Box<dyn AIOpsProvider>>,
+        _aiops_providers: HashMap<String, Box<dyn AIOpsProvider>>,
         k8s_clients: HashMap<String, Box<dyn crate::kubernetes::K8sClient>>,
-        channels: HashMap<String, Box<dyn Channel>>,
+        channels: HashMap<String, Arc<dyn Channel>>,
         observer: Arc<dyn Observer>,
     ) -> Self {
         Self {
@@ -54,7 +54,7 @@ impl AgentOrchestrator {
             router: Arc::new(Router::new(skill_registry.clone())),
             skill_registry,
             mcp_pool,
-            aiops_providers,
+            _aiops_providers,
             k8s_clients,
             channels,
             observer,
@@ -70,7 +70,7 @@ impl AgentOrchestrator {
         mcp_pool: Arc<MCPClientPool>,
         aiops_providers: HashMap<String, Box<dyn AIOpsProvider>>,
         k8s_clients: HashMap<String, Box<dyn crate::kubernetes::K8sClient>>,
-        channels: HashMap<String, Box<dyn Channel>>,
+        channels: HashMap<String, Arc<dyn Channel>>,
         observer: Arc<dyn Observer>,
         llm_provider: Option<Arc<dyn LLMProvider>>,
     ) -> Self {
@@ -89,7 +89,7 @@ impl AgentOrchestrator {
             router: Arc::new(Router::new(skill_registry.clone())),
             skill_registry,
             mcp_pool,
-            aiops_providers,
+            _aiops_providers: aiops_providers,
             k8s_clients,
             channels,
             observer,
@@ -131,9 +131,6 @@ impl AgentOrchestrator {
             &message.content.text[..message.content.text.len().min(100)]
         );
 
-        // Check if there's a pending clarification question
-        let pending_question = session.context.pending_question.clone();
-
         // Check for follow-up questions or clarification requests
         let is_followup = self.is_followup_question(&message.content.text);
 
@@ -170,11 +167,12 @@ impl AgentOrchestrator {
         };
 
         // Add interaction to history
+        let result_str = response.as_ref().ok().map(|r| r.message.content.clone());
         let _ = self.session_manager.add_interaction(
             &session.id,
             &format!("{:?}", intent.intent_type),
             routes.first().and_then(|r| r.skill_name.as_deref()),
-            response.as_ref().ok().map(|r| r.message.content.clone()),
+            result_str.as_deref(),
             response.as_ref().is_ok(),
         );
 
@@ -234,7 +232,7 @@ impl AgentOrchestrator {
 
     /// Parse follow-up intent using conversation context
     async fn parse_followup_intent(&self, message: &str, session: &aiclaw_types::agent::Session) -> Intent {
-        use crate::llm::types::ChatMessage;
+        
 
         // Build context from conversation history
         let history_context = session
@@ -247,7 +245,7 @@ impl AgentOrchestrator {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let context_hint = format!(
+        let _context_hint = format!(
             "当前上下文：\n\
              Cluster: {:?}\n\
              Namespace: {:?}\n\
@@ -333,11 +331,11 @@ impl AgentOrchestrator {
             } else if let (Some(ref mcp_server), Some(ref tool_name)) = (&route.mcp_server, &route.tool_name) {
                 match self.execute_mcp_tool(mcp_server, tool_name, message, intent).await {
                     Ok((text, evidence)) => {
-                        raw_response_text = text;
+                        raw_response_text = text.clone();
                         all_evidence.extend(evidence);
                         tool_outputs.push(ToolOutput::new(
                             format!("{}/{}", mcp_server, tool_name),
-                            text.clone(),
+                            text,
                             true,
                         ));
                         break;
@@ -370,9 +368,9 @@ impl AgentOrchestrator {
                 raw_response_text
             }
         } else {
-            "抱歉，处理你的请求时遇到了问题，请稍后重试。".to_string();
             success = false;
-        }
+            "抱歉，处理你的请求时遇到了问题，请稍后重试。".to_string()
+        };
 
         Ok(AgentResponse {
             session_id: message.channel_id.clone(),
@@ -514,7 +512,7 @@ impl AgentOrchestrator {
         &self,
         mcp_server: &str,
         tool_name: &str,
-        message: &ChannelMessage,
+        _message: &ChannelMessage,
         intent: &Intent,
     ) -> anyhow::Result<(String, Vec<aiclaw_types::agent::EvidenceRecord>)> {
         info!("Executing MCP tool: {}:{}", mcp_server, tool_name);
@@ -837,10 +835,10 @@ impl AgentOrchestrator {
         let mut all_evidence = Vec::new();
         let mut success = true;
 
-        // Execute routes for each cluster in parallel
-        let mut handles = Vec::new();
+        // One query per cluster (sequential). True parallelism would need scoped tasks
+        // and careful ordering of aggregated outputs vs cluster labels.
         for cluster in &clusters {
-            let intent_clone = Intent {
+            let intent_for_cluster = Intent {
                 intent_type: intent.intent_type.clone(),
                 confidence: intent.confidence,
                 entities: {
@@ -851,35 +849,23 @@ impl AgentOrchestrator {
                 raw_query: intent.raw_query.clone(),
             };
 
-            let routes_clone = routes.to_vec();
-            let msg = message.clone();
-
-            handles.push(tokio::spawn(async move {
-                (&msg, &intent_clone, &routes_clone, cluster.clone())
-            }));
-        }
-
-        // Collect results
-        for handle in handles {
-            if let Ok((msg, intent, routes, cluster)) = handle.await {
-                match self.execute_routes(&msg, &intent, &routes).await {
-                    Ok(resp) => {
-                        if !resp.message.content.is_empty() {
-                            all_tool_outputs.push(ToolOutput::new(
-                                format!("cluster/{}", cluster),
-                                resp.message.content.clone(),
-                                resp.success,
-                            ));
-                        }
-                        all_evidence.extend(resp.evidence);
-                        if !resp.success {
-                            success = false;
-                        }
+            match self.execute_routes(message, &intent_for_cluster, routes).await {
+                Ok(resp) => {
+                    if !resp.message.content.is_empty() {
+                        all_tool_outputs.push(ToolOutput::new(
+                            format!("cluster/{}", cluster),
+                            resp.message.content.clone(),
+                            resp.success,
+                        ));
                     }
-                    Err(e) => {
-                        warn!("Cluster {} query failed: {}", cluster, e);
+                    all_evidence.extend(resp.evidence);
+                    if !resp.success {
                         success = false;
                     }
+                }
+                Err(e) => {
+                    warn!("Cluster {} query failed: {}", cluster, e);
+                    success = false;
                 }
             }
         }
@@ -898,8 +884,9 @@ impl AgentOrchestrator {
                 self.format_multi_cluster_output(&all_tool_outputs, &clusters)
             }
         } else {
-            "抱歉，所有集群查询都失败了。".to_string();
+            let response_text = "抱歉，所有集群查询都失败了。".to_string();
             success = false;
+            response_text
         };
 
         Ok(AgentResponse {

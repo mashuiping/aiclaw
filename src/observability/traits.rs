@@ -1,7 +1,6 @@
 //! Observability traits
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use std::time::Duration;
 
 /// Observer event types

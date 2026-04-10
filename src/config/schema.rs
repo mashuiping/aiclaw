@@ -16,7 +16,7 @@ pub struct LLMConfig {
     #[serde(default = "default_llm_provider")]
     pub default_provider: String,
     #[serde(default)]
-    pub routing: LLM RoutingConfig,
+    pub routing: LLMRoutingConfig,
     #[serde(default)]
     pub providers: HashMap<String, LLMProviderConfig>,
 }
@@ -30,7 +30,7 @@ fn default_llm_provider() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct LLM RoutingConfig {
+pub struct LLMRoutingConfig {
     #[serde(default = "default_routing_mode")]
     pub mode: String,
     #[serde(default)]
@@ -106,13 +106,13 @@ impl Default for LLMConfig {
         Self {
             enabled: true,
             default_provider: default_llm_provider(),
-            routing: LLM RoutingConfig::default(),
+            routing: LLMRoutingConfig::default(),
             providers: HashMap::new(),
         }
     }
 }
 
-impl Default for LLM RoutingConfig {
+impl Default for LLMRoutingConfig {
     fn default() -> Self {
         Self {
             mode: default_routing_mode(),
@@ -251,8 +251,8 @@ pub struct FeishuConfig {
     #[serde(default)]
     pub webhook_url: Option<String>,
 
-    #[serde(default)]
-    pub long polling_timeout_secs: u64,
+    #[serde(default, alias = "long_polling_timeout_secs")]
+    pub polling_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -310,9 +310,10 @@ pub struct MCPConfig {
     pub transport: MCPTransport,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(tag = "transport_type")]
 pub enum MCPTransport {
+    #[default]
     Stdio,
     SSE { url: String },
 }
@@ -392,7 +393,7 @@ pub enum TracingLevel {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct SecurityConfig {
     #[serde(default = "default_dangerous_commands")]
     pub dangerous_commands: Vec<String>,

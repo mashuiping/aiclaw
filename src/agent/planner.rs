@@ -1,7 +1,7 @@
 //! Execution planner - plans what queries to execute based on user intent
 
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::llm::traits::LLMProvider;
 use crate::llm::types::{ChatMessage, ChatOptions};
