@@ -152,11 +152,12 @@ impl AgentOrchestrator {
 
         let skill_executor = skill_executor_for_config(&skills_exec, kubeconfig.clone());
         let llm_skill_executor = match (&llm_provider, skills_exec.enabled) {
-            (Some(provider), true) => Some(Arc::new(LLMSkillExecutor::new(
+            (Some(provider), true) => Some(Arc::new(LLMSkillExecutor::with_vm_config(
                 provider.clone(),
                 skill_executor.clone(),
                 skills_exec.max_steps,
                 std::time::Duration::from_secs(skills_exec.timeout_secs.max(1)),
+                skills_exec.victoriametrics.clone(),
             ))),
             _ => None,
         };

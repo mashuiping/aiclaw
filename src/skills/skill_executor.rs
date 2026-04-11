@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+use crate::config::VictoriametricsConfig;
 use crate::llm::traits::LLMProvider;
 use crate::llm::types::Usage;
 use crate::skills::SkillExecutor;
@@ -95,6 +96,8 @@ pub struct LLMSkillExecutor {
     skill_executor: Arc<SkillExecutor>,
     max_steps: usize,
     shell_timeout: Duration,
+    /// VictoriaMetrics connection settings injected as env vars into shell commands.
+    vm_config: VictoriametricsConfig,
 }
 
 impl LLMSkillExecutor {
@@ -109,6 +112,24 @@ impl LLMSkillExecutor {
             skill_executor,
             max_steps: max_steps.max(1),
             shell_timeout,
+            vm_config: VictoriametricsConfig::default(),
+        }
+    }
+
+    /// Create with VictoriaMetrics config for env var injection.
+    pub fn with_vm_config(
+        provider: Arc<dyn LLMProvider>,
+        skill_executor: Arc<SkillExecutor>,
+        max_steps: usize,
+        shell_timeout: Duration,
+        vm_config: VictoriametricsConfig,
+    ) -> Self {
+        Self {
+            provider,
+            skill_executor,
+            max_steps: max_steps.max(1),
+            shell_timeout,
+            vm_config,
         }
     }
 
@@ -277,14 +298,12 @@ impl LLMSkillExecutor {
                 .join("\n")
         };
 
-        let prompt = SKILL_EXECUTION_PROMPT
+        SKILL_EXECUTION_PROMPT
             .replace("{{skill_content}}", skill_content)
             .replace("{{user_query}}", user_query)
             .replace("{{executed_commands}}", &executed_commands)
             .replace("{{current_status}}", current_status)
-            .replace("{{max_steps}}", &max_steps.to_string());
-
-        prompt
+            .replace("{{max_steps}}", &max_steps.to_string())
     }
 
     /// Interpolate parameters into command
@@ -299,6 +318,18 @@ impl LLMSkillExecutor {
 
     /// Execute a shell command
     async fn execute_shell_command(&self, command: &str, kubeconfig: Option<&Path>) -> (String, bool) {
+        // Build env vars: VM connection settings for VictoriaMetrics skill curls.
+        let mut tool_env: HashMap<String, String> = HashMap::new();
+        if let Some(ref url) = self.vm_config.vm_metrics_url {
+            tool_env.insert("VM_METRICS_URL".to_string(), url.clone());
+        }
+        if let Some(ref url) = self.vm_config.vm_logs_url {
+            tool_env.insert("VM_LOGS_URL".to_string(), url.clone());
+        }
+        if let Some(ref header) = self.vm_config.vm_auth_header {
+            tool_env.insert("VM_AUTH_HEADER".to_string(), header.clone());
+        }
+
         // Use the skill executor to run the command
         let tool = aiclaw_types::skill::SkillTool {
             name: "shell_command".to_string(),
@@ -306,7 +337,7 @@ impl LLMSkillExecutor {
             kind: aiclaw_types::skill::ToolKind::Shell,
             command: command.to_string(),
             args: HashMap::new(),
-            env: HashMap::new(),
+            env: tool_env,
             timeout_secs: Some(self.shell_timeout.as_secs()),
         };
 
@@ -333,7 +364,7 @@ impl LLMSkillExecutor {
         // Check for markdown code block
         if content.contains("```json") {
             let start = content.find("```json").unwrap() + 7;
-            let end = content[start..].find("```").map(|i| start + i);
+            let end = content[start..].find("```");
             return end.map(|e| content[start..e].trim().to_string());
         }
 
@@ -346,13 +377,13 @@ impl LLMSkillExecutor {
         // Try to find JSON directly
         if content.starts_with('{') {
             let mut depth = 0;
-            for (i, c) in content.chars().enumerate() {
+            for (byte_idx, c) in content.char_indices() {
                 if c == '{' {
                     depth += 1;
                 } else if c == '}' {
                     depth -= 1;
                     if depth == 0 {
-                        return Some(content[..=i].to_string());
+                        return Some(content[..=byte_idx].to_string());
                     }
                 }
             }

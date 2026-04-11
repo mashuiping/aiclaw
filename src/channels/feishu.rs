@@ -291,10 +291,11 @@ impl FeishuChannel {
                     mentions.iter().map(|m| Mention {
                         id: m.id.open_id.clone().unwrap_or_default(),
                         name: m.key.clone(),
-                        mention_type: if m.mention_type == "at" {
-                            MentionType::User
-                        } else {
-                            MentionType::User
+                        mention_type: match m.mention_type.as_str() {
+                            "at" => MentionType::User,
+                            "here" => MentionType::Here,
+                            "channel" => MentionType::Channel,
+                            _ => MentionType::Channel,
                         },
                     }).collect()
                 })
