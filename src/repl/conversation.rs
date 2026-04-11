@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::agent::context::ContextManager;
+use crate::agent::output_budget::{self, OutputBudget};
 use crate::llm::traits::LLMProvider;
 use crate::llm::types::{ChatDelta, ChatMessage, ChatOptions, ToolCall};
 
@@ -23,6 +25,10 @@ pub struct ConversationRuntime {
     max_tool_iterations: usize,
     /// Last thinking content for /thinkback.
     last_thinking: String,
+    output_budget: OutputBudget,
+    context_manager: ContextManager,
+    /// Track recent tool calls for loop detection.
+    recent_tool_calls: Vec<(String, String)>,
 }
 
 impl ConversationRuntime {
@@ -31,6 +37,7 @@ impl ConversationRuntime {
         kubeconfig: Option<PathBuf>,
     ) -> Self {
         let messages = vec![ChatMessage::system(super::SYSTEM_PROMPT)];
+        let context_manager = ContextManager::new(provider.clone());
         Self {
             provider,
             messages,
@@ -38,6 +45,9 @@ impl ConversationRuntime {
             kubeconfig,
             max_tool_iterations: 25,
             last_thinking: String::new(),
+            output_budget: OutputBudget::default_budget(),
+            context_manager,
+            recent_tool_calls: Vec::new(),
         }
     }
 
@@ -59,6 +69,12 @@ impl ConversationRuntime {
     /// Run a single user turn: stream LLM, execute tools, loop until done.
     pub async fn run_turn(&mut self, user_input: &str) {
         self.messages.push(ChatMessage::user(user_input));
+        self.recent_tool_calls.clear();
+
+        // Compact context if approaching limit
+        if let Err(e) = self.context_manager.compact_if_needed(&mut self.messages).await {
+            self.renderer.render_error(&format!("Context compaction failed: {e:#}"));
+        }
 
         let tool_specs = tools::tool_specs();
         let options = ChatOptions {
@@ -192,6 +208,27 @@ impl ConversationRuntime {
                 return;
             }
 
+            // Loop detection: check for repeated identical tool calls
+            let mut loop_detected = false;
+            for tc in &tool_calls {
+                let call_key = (tc.name.clone(), tc.arguments.clone());
+                let repeat_count = self.recent_tool_calls.iter()
+                    .filter(|prev| prev.0 == call_key.0 && prev.1 == call_key.1)
+                    .count();
+                if repeat_count >= 2 {
+                    self.renderer.render_error(&format!(
+                        "Loop detected: tool '{}' called 3+ times with same arguments. Stopping.",
+                        tc.name
+                    ));
+                    loop_detected = true;
+                    break;
+                }
+                self.recent_tool_calls.push(call_key);
+            }
+            if loop_detected {
+                return;
+            }
+
             // Execute tool calls
             for tc in &tool_calls {
                 let summary = build_tool_summary(&tc.name, &tc.arguments);
@@ -215,12 +252,14 @@ impl ConversationRuntime {
                     .await
                 };
 
+                // Apply output budget truncation before adding to context
+                let truncated = output_budget::truncate_tool_output(&result.output, &self.output_budget);
+
                 self.renderer
                     .render_tool_result(&tc.name, &result.output, result.is_error);
 
-                // Add tool result to conversation
                 self.messages
-                    .push(ChatMessage::tool_result(&tc.id, &result.output));
+                    .push(ChatMessage::tool_result(&tc.id, &truncated.content));
             }
 
             if iteration + 1 >= self.max_tool_iterations {

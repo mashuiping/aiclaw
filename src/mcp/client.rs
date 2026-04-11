@@ -255,6 +255,17 @@ impl MCPClientPool {
         self.clients.keys().cloned().collect()
     }
 
+    /// Return all cached tools across all connected servers, paired with server name.
+    pub fn all_cached_tools(&self) -> Vec<(String, aiclaw_types::mcp::ToolInfo)> {
+        let mut out = Vec::new();
+        for (name, client) in &self.clients {
+            for tool in client.cached_tools() {
+                out.push((name.clone(), tool));
+            }
+        }
+        out
+    }
+
     /// Check health of all clients
     pub async fn health_check_all(&self) -> HashMap<String, bool> {
         let mut results = HashMap::new();

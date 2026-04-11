@@ -31,38 +31,38 @@ pub fn apply_kubectl_context(command: &str, context: Option<&str>) -> String {
 }
 
 /// Prompt for LLM to decide next action given skill and context
-const SKILL_EXECUTION_PROMPT: &str = r#"你是运维诊断专家。请根据以下 Skill 的内容，帮助用户诊断问题。
+const SKILL_EXECUTION_PROMPT: &str = r#"You are an operations diagnostics expert. Use the skill content below to help the user diagnose the problem.
 
-## Skill 内容
+## Skill Content
 {{skill_content}}
 
-## 用户问题
+## User Question
 {{user_query}}
 
-## 已执行的命令和结果
+## Executed Commands and Results
 {{executed_commands}}
 
-## 当前状态
+## Current Status
 {{current_status}}
 
-请分析以上信息，决定下一步：
+Analyze the information above and decide the next step:
 
-1. 如果诊断尚未完成，选择一个合适的命令执行（从 Skill 中选择或根据实际情况构造）
-2. 如果已收集到足够信息，给出最终诊断结论
+1. If diagnosis is not complete, choose an appropriate command to execute (from the Skill or construct one based on the situation)
+2. If enough information has been collected, provide the final diagnosis
 
-直接返回 JSON 格式：
+Return JSON directly:
 {
-  "next_command": "kubectl describe pod xxx -n yyy",  // 或 null 表示诊断完成
-  "reasoning": "因为结果显示...，需要进一步检查...",
-  "diagnosis": null,  // 如果诊断完成，填写诊断结论
-  "recommendations": ["建议1", "建议2"]  // 如果诊断完成，填写建议
+  "next_command": "kubectl describe pod xxx -n yyy",  // or null when diagnosis is complete
+  "reasoning": "Because the results show..., need to further check...",
+  "diagnosis": null,  // fill in diagnosis conclusion when complete
+  "recommendations": ["recommendation 1", "recommendation 2"]  // fill in when complete
 }
 
-重要：
-- 命令必须从 Skill 中提供的命令中选择，或根据实际情况构造合理的 kubectl 命令
-- 如果 Skill 包含条件判断，根据命令结果判断条件是否满足
-- 最多执行 {{max_steps}} 步，如果仍未诊断清楚，给出当前最佳判断
-- 若多次 kubectl/helm 失败且疑似缺少集群凭证，**不要继续循环执行同类命令**；请用户通过 **`AICLAW_KUBECONFIG=<绝对路径>`** 启动本程序。用户若已在「用户问题」中写明 kubeconfig 路径，**不要再次询问路径**。"#;
+Important:
+- Commands should be chosen from those provided in the Skill, or construct reasonable kubectl commands based on the situation
+- If the Skill contains conditional logic, evaluate conditions based on command results
+- Execute at most {{max_steps}} steps; if still unclear, provide your best judgment
+- If kubectl/helm commands fail repeatedly (likely missing cluster credentials), **stop retrying**; ask the user to start the program with **`AICLAW_KUBECONFIG=<absolute_path>`**. If the user already specified a kubeconfig path in their question, **do not ask again**."#;
 
 /// Result of skill execution
 #[derive(Debug)]

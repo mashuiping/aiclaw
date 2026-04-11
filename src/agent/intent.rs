@@ -16,6 +16,8 @@ pub struct IntentParser {
     patterns: Vec<IntentPattern>,
     llm_classifier: Option<Arc<dyn IntentClassifier>>,
     llm_timeout: Duration,
+    /// Known cluster names loaded from config (e.g. "prod", "staging", "dev").
+    known_cluster_names: Vec<String>,
 }
 
 struct IntentPattern {
@@ -32,6 +34,7 @@ impl IntentParser {
             patterns: Self::build_patterns(),
             llm_classifier: None,
             llm_timeout: Duration::from_secs(10),
+            known_cluster_names: Vec::new(),
         }
     }
 
@@ -42,7 +45,14 @@ impl IntentParser {
             patterns: Self::build_patterns(),
             llm_classifier: Some(classifier),
             llm_timeout: Duration::from_secs(10),
+            known_cluster_names: Vec::new(),
         }
+    }
+
+    /// Set known cluster names from config so entity extraction uses them
+    /// instead of hardcoded keywords.
+    pub fn set_known_clusters(&mut self, names: Vec<String>) {
+        self.known_cluster_names = names;
     }
 
     fn build_patterns() -> Vec<IntentPattern> {
@@ -251,26 +261,15 @@ impl IntentParser {
             }
         }
 
-        // Also detect common cluster naming patterns like "prod", "test", "staging"
-        let cluster_keywords = [
-            ("prod", "prod"),
-            ("production", "prod"),
-            ("pre-prod", "pre-prod"),
-            ("preprod", "pre-prod"),
-            ("staging", "staging"),
-            ("test", "test"),
-            ("dev", "dev"),
-            ("development", "dev"),
-        ];
-
-        let message_lower = message.to_lowercase();
-        for (keyword, cluster_name) in &cluster_keywords {
-            // Match "prod cluster" or "cluster=prod" or "在 prod 集群"
-            let pattern = format!(r"(?i)(?:{}集群|{}集群|集群{}\s|cluster\s*{}|{}$)", keyword, keyword, keyword, keyword, keyword);
-            if let Some(re) = Regex::new(&pattern).ok().filter(|r| r.is_match(&message_lower)) {
-                let _ = re; // Silence unused warning
-                entities.cluster = Some(cluster_name.to_string());
-                break;
+        // Detect cluster references using names loaded from config
+        if entities.cluster.is_none() && !self.known_cluster_names.is_empty() {
+            let message_lower = message.to_lowercase();
+            for name in &self.known_cluster_names {
+                let name_lower = name.to_lowercase();
+                if message_lower.contains(&name_lower) {
+                    entities.cluster = Some(name.clone());
+                    break;
+                }
             }
         }
 

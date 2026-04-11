@@ -1,5 +1,30 @@
 //! Agent orchestrator - main agent logic
 
+/// UI-facing string constants. Centralised so they can be swapped for i18n.
+mod messages {
+    pub const UNKNOWN_INTENT_HELP: &str = concat!(
+        "抱歉，我没有理解你的请求。你说的是 \"{}\" 吗？\n\n",
+        "我可以帮你：\n",
+        "- 查看日志：\"查看 pod xxx 的日志\"\n",
+        "- 查询指标：\"查询 CPU 使用率\"\n",
+        "- 检查健康：\"检查集群状态\"\n",
+        "- 排查问题：\"排查 pod xxx\"",
+    );
+    pub const EXEC_ERROR_FALLBACK: &str = "抱歉，处理你的请求时遇到了问题，请稍后重试。";
+    pub const NO_LLM_PROVIDER: &str = "已启用 `skills.exec.enabled`，但未配置可用的 LLM provider（请使用 `AgentOrchestrator::with_llm` 并提供模型）。";
+    pub const SKILL_EXEC_DISABLED: &str = "该技能包含诊断文档，但未启用自动执行。请在配置中设置 `[skills].exec.enabled = true`（并配置 LLM 与命令安全策略）。";
+    pub const SKILL_NO_TOOLS: &str = "该技能未声明可执行工具（`SKILL.toml` 的 `[[tools]]`），且无可用文档内容。";
+    pub const ALL_CLUSTERS_FAILED: &str = "抱歉，所有集群查询都失败了。";
+    pub const MULTI_CLUSTER_TITLE: &str = "## 多集群查询结果\n\n";
+    pub const MULTI_CLUSTER_HEADER: &str = "| 集群 | 状态 | 摘要 |\n|------|------|------|\n";
+    pub const DIAGNOSIS_HEADER: &str = "## Diagnosis\n\n";
+    pub const RESULTS_LABEL: &str = "**Results**:\n";
+    pub const MANUAL_REVIEW: &str = "**Suggestion**: Please review the results above manually.";
+    pub const STATUS_PARTIAL: &str = "partial success";
+    pub const STATUS_ISSUES: &str = "issues found";
+
+}
+
 use aiclaw_types::agent::{AgentResponse, Intent, IntentType, MessageRole, OutgoingMessage, OutputFormat};
 use aiclaw_types::channel::{ChannelMessage, SendMessage};
 use chrono::Utc;
@@ -10,8 +35,11 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use super::context::ContextManager;
 use super::intent::IntentParser;
-use super::planner::{PlanStep, Planner, QueryType};
+use super::output_budget::{self, OutputBudget};
+use super::planner::{PlanStep, Planner};
+use super::prompt_builder::PromptBuilder;
 use super::router::{Router, RouteResult};
 use super::session::SessionManager;
 use crate::aiops::AIOpsProvider;
@@ -47,6 +75,11 @@ pub struct AgentOrchestrator {
     /// From `AICLAW_KUBECONFIG` at startup; session `kubeconfig_path` takes precedence when present.
     kubeconfig: Option<PathBuf>,
     default_cluster: Option<String>,
+    output_budget: OutputBudget,
+    context_manager: Option<ContextManager>,
+    /// Available for building dynamic prompts when skills context is needed.
+    #[allow(dead_code)]
+    prompt_builder: PromptBuilder,
 }
 
 impl AgentOrchestrator {
@@ -66,8 +99,12 @@ impl AgentOrchestrator {
         Self {
             name: name.into(),
             session_manager,
-            intent_parser: IntentParser::new(),
-            router: Arc::new(Router::new(skill_registry.clone())),
+            intent_parser: {
+                let mut p = IntentParser::new();
+                p.set_known_clusters(clusters.keys().cloned().collect());
+                p
+            },
+            router: Arc::new(Router::new(skill_registry.clone(), mcp_pool.clone())),
             skill_registry,
             mcp_pool,
             _aiops_providers,
@@ -81,6 +118,9 @@ impl AgentOrchestrator {
             skills_exec,
             kubeconfig,
             default_cluster: None,
+            output_budget: OutputBudget::default_budget(),
+            context_manager: None,
+            prompt_builder: PromptBuilder::new(),
         }
     }
 
@@ -101,9 +141,13 @@ impl AgentOrchestrator {
         let summarizer = llm_provider.as_ref().map(|p| Arc::new(Summarizer::new(p.clone())));
         let planner = llm_provider.as_ref().map(|p| Arc::new(Planner::new(p.clone())));
 
-        let intent_parser = match llm_provider.clone() {
-            Some(provider) => IntentParser::with_llm(provider),
-            None => IntentParser::new(),
+        let intent_parser = {
+            let mut p = match llm_provider.clone() {
+                Some(provider) => IntentParser::with_llm(provider),
+                None => IntentParser::new(),
+            };
+            p.set_known_clusters(clusters.keys().cloned().collect());
+            p
         };
 
         let skill_executor = skill_executor_for_config(&skills_exec, kubeconfig.clone());
@@ -117,11 +161,13 @@ impl AgentOrchestrator {
             _ => None,
         };
 
+        let context_manager = llm_provider.as_ref().map(|p| ContextManager::new(p.clone()));
+
         Self {
             name: name.into(),
             session_manager,
             intent_parser,
-            router: Arc::new(Router::new(skill_registry.clone())),
+            router: Arc::new(Router::new(skill_registry.clone(), mcp_pool.clone())),
             skill_registry,
             mcp_pool,
             _aiops_providers: aiops_providers,
@@ -135,6 +181,9 @@ impl AgentOrchestrator {
             skills_exec,
             kubeconfig,
             default_cluster,
+            output_budget: OutputBudget::default_budget(),
+            context_manager,
+            prompt_builder: PromptBuilder::new(),
         }
     }
 
@@ -250,6 +299,26 @@ impl AgentOrchestrator {
             );
         }
 
+        // Log context utilization for observability
+        if let Some(ref cm) = self.context_manager {
+            let history = self.session_manager.get_conversation_history(&session.id);
+            let llm_msgs: Vec<crate::llm::types::ChatMessage> = history
+                .iter()
+                .map(|h| crate::llm::types::ChatMessage {
+                    role: match h.role {
+                        aiclaw_types::agent::MessageRole::User => crate::llm::types::MessageRole::User,
+                        aiclaw_types::agent::MessageRole::Assistant => crate::llm::types::MessageRole::Assistant,
+                        _ => crate::llm::types::MessageRole::User,
+                    },
+                    content: h.content.clone(),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                })
+                .collect();
+            cm.log_utilization(&llm_msgs);
+        }
+
         // For Debug intent with planner available, use planner-based execution
         let response = if intent.intent_type == IntentType::Debug && self.planner.is_some() {
             self.execute_with_planner(&message, &intent, runtime_kube.clone(), &mut usage)
@@ -319,66 +388,47 @@ impl AgentOrchestrator {
         })
     }
 
-    /// Check if message is a follow-up question
+    /// Check if message is a follow-up question.
+    /// Short messages (< 20 chars) are treated as follow-ups heuristically.
     fn is_followup_question(&self, message: &str) -> bool {
-        let lower = message.to_lowercase();
-        let followup_patterns = [
-            "然后呢", "然后", "接下来", "还有呢",
-            "详细", "具体", "解释一下", "为什么",
-            "怎么", "如何", "什么意思",
-            "继续", "说更多", "补充",
-            "是", "不是", "对", "不对",
-        ];
-
-        // Check if message is short (likely a follow-up)
-        if message.chars().count() < 20 {
-            return true;
-        }
-
-        // Check for follow-up keywords
-        for pattern in &followup_patterns {
-            if lower.contains(pattern) {
-                return true;
-            }
-        }
-
-        false
+        message.chars().count() < 20
     }
 
-    /// Parse follow-up intent using conversation context
+    /// Parse follow-up intent using conversation context.
+    ///
+    /// Enriches the user's short follow-up message with conversation history
+    /// so the intent parser (LLM or rule-based) has enough context to classify.
     async fn parse_followup_intent(
         &self,
         message: &str,
         session: &aiclaw_types::agent::Session,
     ) -> (Intent, Usage) {
-        // Build context from conversation history
         let history_context = session
             .context
             .conversation_history
             .iter()
             .rev()
-            .take(6) // Last 6 messages
-            .map(|m| format!("{}: {}", m.role.as_str(), m.content))
+            .take(6)
+            .map(|m| format!("{}: {}", m.role.as_str(), utf8_prefix_chars(&m.content, 200)))
             .collect::<Vec<_>>()
             .join("\n");
 
-        let _context_hint = format!(
-            "当前上下文：\n\
-             Cluster: {:?}\n\
-             Namespace: {:?}\n\
-             最近对话：\n{}\n\n\
-             当前问题：{}",
-            session.context.current_cluster,
-            session.context.current_namespace,
+        let enriched_message = format!(
+            "Context — cluster: {}, namespace: {}\n\
+             Recent conversation:\n{}\n\n\
+             Current question: {}",
+            session.context.current_cluster.as_deref().unwrap_or("unknown"),
+            session.context.current_namespace.as_deref().unwrap_or("default"),
             history_context,
             message
         );
 
-        // For now, fall back to regular parsing
-        // A full implementation would call LLM to interpret the follow-up in context
-        let (mut intent, usage) = self.intent_parser.parse(message).await;
+        // Pass the enriched message to the intent parser so LLM has context
+        let (mut intent, usage) = self.intent_parser.parse(&enriched_message).await;
 
-        // Update entities with session context if not specified in current message
+        // Keep the original short message as raw_query for display
+        intent.raw_query = message.to_string();
+
         if intent.entities.cluster.is_none() {
             intent.entities.cluster = session.context.current_cluster.clone();
         }
@@ -395,10 +445,7 @@ impl AgentOrchestrator {
         message: &ChannelMessage,
         intent: &Intent,
     ) -> anyhow::Result<AgentResponse> {
-        let response_text = format!(
-            "抱歉，我没有理解你的请求。你说的是 \"{}\" 吗？\n\n我可以帮你：\n- 查看日志：\"查看 pod xxx 的日志\"\n- 查询指标：\"查询 CPU 使用率\"\n- 检查健康：\"检查集群状态\"\n- 排查问题：\"排查 pod xxx\"",
-            intent.raw_query
-        );
+        let response_text = messages::UNKNOWN_INTENT_HELP.replace("{}", &intent.raw_query);
 
         let response = AgentResponse {
             session_id: String::new(),
@@ -496,7 +543,7 @@ impl AgentOrchestrator {
             }
         } else {
             success = false;
-            "抱歉，处理你的请求时遇到了问题，请稍后重试。".to_string()
+            messages::EXEC_ERROR_FALLBACK.to_string()
         };
 
         Ok(AgentResponse {
@@ -577,11 +624,14 @@ impl AgentOrchestrator {
 
             for result in results {
                 let tool_name = result.tool_name.clone();
-                let tool_output = if result.success {
+                let raw_output = if result.success {
                     result.output.clone().unwrap_or_default()
                 } else {
                     result.error.clone().unwrap_or_default()
                 };
+
+                let truncated = output_budget::truncate_tool_output(&raw_output, &self.output_budget);
+                let tool_output = truncated.content;
 
                 output += &format!("[{}]\n{}\n\n", tool_name, tool_output);
                 tool_results.push((tool_name.clone(), tool_output, result.success));
@@ -630,13 +680,13 @@ impl AgentOrchestrator {
                 }
                 None => {
                     warn!("skills.exec.enabled but no LLM provider; cannot run LLM skill loop");
-                    output = "已启用 `skills.exec.enabled`，但未配置可用的 LLM provider（请使用 `AgentOrchestrator::with_llm` 并提供模型）。".to_string();
+                    output = messages::NO_LLM_PROVIDER.to_string();
                 }
             }
         } else if !skill.raw_content.is_empty() && !self.skills_exec.enabled {
-            output = "该技能包含诊断文档，但未启用自动执行。请在配置中设置 `[skills].exec.enabled = true`（并配置 LLM 与命令安全策略）。".to_string();
+            output = messages::SKILL_EXEC_DISABLED.to_string();
         } else {
-            output = "该技能未声明可执行工具（`SKILL.toml` 的 `[[tools]]`），且无可用文档内容。".to_string();
+            output = messages::SKILL_NO_TOOLS.to_string();
         }
 
         self.observer.record_event(ObserverEvent::SkillExecutionEnd {
@@ -777,7 +827,9 @@ impl AgentOrchestrator {
                     success: true,
                 });
 
-                let output = serde_json::to_string_pretty(&value)?;
+                let raw_output = serde_json::to_string_pretty(&value)?;
+                let truncated = output_budget::truncate_tool_output(&raw_output, &self.output_budget);
+                let output = truncated.content;
                 Ok((output, evidence))
             }
             Err(e) => {
@@ -807,9 +859,19 @@ impl AgentOrchestrator {
 
         info!("Using planner for Debug intent: {}", intent.raw_query);
 
-        // Create execution plan
+        // Gather matched skills for dynamic prompt injection
+        let routes = self.router.route(intent);
+        let matched_skills: Vec<_> = routes
+            .iter()
+            .filter_map(|r| r.skill_name.as_ref())
+            .filter_map(|name| self.skill_registry.get(name))
+            .collect();
+        let skill_refs: Vec<&aiclaw_types::skill::SkillMetadata> =
+            matched_skills.iter().map(|s| s.as_ref()).collect();
+
+        // Create execution plan with dynamic skill context
         let plan = match planner
-            .plan(&intent.raw_query, &format!("{:?}", intent.intent_type))
+            .plan(&intent.raw_query, &format!("{:?}", intent.intent_type), &skill_refs)
             .await
         {
             Ok((p, u)) => {
@@ -858,7 +920,13 @@ impl AgentOrchestrator {
             }
 
             // Execute based on query type
-            let result = self.execute_planned_step(step, &params).await;
+            let kubectl_ctx = self.kubectl_context_for_intent(intent);
+            let result = self.execute_planned_step(
+                step,
+                &params,
+                kubeconfig.as_deref(),
+                kubectl_ctx.as_deref(),
+            ).await;
             match result {
                 Ok((tool_output, evidence)) => {
                     all_tool_outputs.push(tool_output);
@@ -871,21 +939,27 @@ impl AgentOrchestrator {
             }
         }
 
-        // Generate final reasoning response
+        let tool_summary = all_tool_outputs
+            .iter()
+            .map(|o| format!("- {}: {}", o.tool_name, o.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let tool_detail = all_tool_outputs
+            .iter()
+            .map(|o| format!("### {}\n{}\n", o.tool_name, o.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         let response_text = if let Some(ref summarizer) = self.summarizer {
-            // Use LLM to reason over all collected data
             let reasoning_prompt = format!(
-                "用户问题：{}\n\nLLM 规划分析：{}\n\n查询结果：\n{}\n\n请综合分析以上信息，给出最终的问题诊断结论和解决方案。",
+                "User question: {}\n\nLLM planner analysis: {}\n\nQuery results:\n{}\n\nSynthesize the information above and provide a final diagnosis and solution.",
                 intent.raw_query,
                 plan.reasoning,
-                all_tool_outputs
-                    .iter()
-                    .map(|o| format!("- {}: {}", o.tool_name, o.content))
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                tool_summary
             );
 
-            match summarizer.summarize_text(&reasoning_prompt, "诊断结论和解决方案").await {
+            match summarizer.summarize_text(&reasoning_prompt, "diagnosis and solution").await {
                 Ok((summary, u)) => {
                     usage.merge_assign(&u);
                     summary
@@ -893,26 +967,23 @@ impl AgentOrchestrator {
                 Err(e) => {
                     warn!("LLM reasoning failed: {}", e);
                     format!(
-                        "## 诊断结论\n\n{}\n\n**查询结果**：\n{}\n\n**建议**：请人工查看上述查询结果进行分析。",
+                        "{}{}\n\n{}{}\n\n{}",
+                        messages::DIAGNOSIS_HEADER,
                         plan.reasoning,
-                        all_tool_outputs
-                            .iter()
-                            .map(|o| format!("### {}\n{}\n", o.tool_name, o.content))
-                            .collect::<Vec<_>>()
-                            .join("\n")
+                        messages::RESULTS_LABEL,
+                        tool_detail,
+                        messages::MANUAL_REVIEW,
                     )
                 }
             }
         } else {
             format!(
-                "## 诊断分析\n\n{}\n\n**查询结果**：\n{}\n\n**状态**：{}",
+                "{}{}\n\n{}{}\n\n**Status**: {}",
+                messages::DIAGNOSIS_HEADER,
                 plan.reasoning,
-                all_tool_outputs
-                    .iter()
-                    .map(|o| format!("### {}\n{}\n", o.tool_name, o.content))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                if success { "部分成功" } else { "有问题" }
+                messages::RESULTS_LABEL,
+                tool_detail,
+                if success { messages::STATUS_PARTIAL } else { messages::STATUS_ISSUES }
             )
         };
 
@@ -934,53 +1005,66 @@ impl AgentOrchestrator {
         })
     }
 
-    /// Execute a single planned step
+    /// Execute a single planned step by running the LLM-decided command directly.
     async fn execute_planned_step(
         &self,
         step: &PlanStep,
         params: &HashMap<String, String>,
+        kubeconfig: Option<&std::path::Path>,
+        kubectl_ctx: Option<&str>,
     ) -> anyhow::Result<(ToolOutput, Vec<aiclaw_types::agent::EvidenceRecord>)> {
-        // For now, we execute via skills/MCP based on query type
-        // This is a simplified implementation - a full implementation would
-        // call metrics APIs or shell-backed cluster queries (e.g. `[skills].exec`).
+        let mut command = step.command.clone();
+        for (key, value) in params {
+            let placeholder = format!("{{{{{}}}}}", key);
+            command = command.replace(&placeholder, value);
+        }
 
-        let (tool_name, query_result) = match step.query_type {
-            QueryType::PodLogs => {
-                let pod = params.get("pod_name").cloned().unwrap_or_default();
-                let ns = params.get("namespace").cloned().unwrap_or_else(|| "default".to_string());
-                (
-                    format!("pod_logs/{}/{}", ns, pod),
-                    format!("[模拟日志] Pod {}/{} 的最近 100 行日志", ns, pod),
-                )
-            }
-            QueryType::PodDescribe => {
-                let pod = params.get("pod_name").cloned().unwrap_or_default();
-                let ns = params.get("namespace").cloned().unwrap_or_else(|| "default".to_string());
-                (
-                    format!("pod_describe/{}/{}", ns, pod),
-                    format!("[模拟] Pod {}/{} 详细信息", ns, pod),
-                )
-            }
-            QueryType::MetricsQuery => {
-                let query = params.get("query").cloned().unwrap_or_default();
-                (
-                    format!("metrics_query/{}", query),
-                    format!("[模拟] Metrics 查询: {}", query),
-                )
-            }
-            QueryType::ClusterHealth => (
-                "cluster_health".to_string(),
-                "[模拟] 集群健康状态: 所有组件正常".to_string(),
-            ),
-            _ => (
-                format!("{}/{:?}", step.description, step.query_type),
-                format!("[模拟] 执行: {}", step.description),
-            ),
+        let tool_name = format!("plan_step_{}/{}", step.step_id, step.description);
+        let cmd_with_ctx = crate::skills::apply_kubectl_context(&command, kubectl_ctx);
+
+        let tool = aiclaw_types::skill::SkillTool {
+            name: tool_name.clone(),
+            description: step.description.clone(),
+            kind: aiclaw_types::skill::ToolKind::Shell,
+            command: cmd_with_ctx,
+            args: HashMap::new(),
+            env: HashMap::new(),
+            timeout_secs: Some(30),
         };
 
+        let result = self
+            .skill_executor
+            .execute_tool(&tool, &HashMap::new(), kubeconfig)
+            .await;
+
+        let (output_text, success) = match result {
+            Ok(r) => {
+                let text = if r.success {
+                    r.output.unwrap_or_default()
+                } else {
+                    r.error.unwrap_or_default()
+                };
+                (text, r.success)
+            }
+            Err(e) => (format!("Error: {}", e), false),
+        };
+
+        let truncated = output_budget::truncate_tool_output(&output_text, &self.output_budget);
+
+        let evidence = vec![aiclaw_types::agent::EvidenceRecord {
+            timestamp: Utc::now(),
+            source: "planner".to_string(),
+            action: tool_name.clone(),
+            data: serde_json::json!({
+                "command": command,
+                "success": success,
+                "step_id": step.step_id,
+            }),
+        }];
+
         Ok((
-            ToolOutput::new(&tool_name, &query_result, true),
-            vec![],
+            ToolOutput::new(&tool_name, &truncated.content, success),
+            evidence,
         ))
     }
 
@@ -1036,26 +1120,17 @@ impl AgentOrchestrator {
         true
     }
 
-    /// Check if this is a multi-cluster query (no specific cluster specified)
+    /// Check if this is a multi-cluster query.
+    ///
+    /// True when no specific cluster is targeted AND the query explicitly mentions
+    /// "all clusters" (or Chinese equivalent). We keep this minimal -- LLM entity
+    /// extraction sets `intent.entities.cluster` when a single cluster is meant.
     fn is_multi_cluster_query(&self, intent: &Intent) -> bool {
-        // Multi-cluster if no specific cluster is mentioned and user says something like "all clusters"
         if intent.entities.cluster.is_some() {
             return false;
         }
-
         let query = intent.raw_query.to_lowercase();
-        let multi_cluster_patterns = [
-            "所有集群", "全部集群", "all cluster", "all clusters",
-            "各个集群", "每个集群", "查一下全部", "集群状态",
-        ];
-
-        for pattern in &multi_cluster_patterns {
-            if query.contains(&pattern.to_lowercase()) {
-                return true;
-            }
-        }
-
-        false
+        query.contains("all cluster") || query.contains("所有集群") || query.contains("全部集群")
     }
 
     /// Get list of known clusters
@@ -1145,7 +1220,7 @@ impl AgentOrchestrator {
                 self.format_multi_cluster_output(&all_tool_outputs, &clusters)
             }
         } else {
-            let response_text = "抱歉，所有集群查询都失败了。".to_string();
+            let response_text = messages::ALL_CLUSTERS_FAILED.to_string();
             success = false;
             response_text
         };
@@ -1170,9 +1245,8 @@ impl AgentOrchestrator {
 
     /// Format multi-cluster outputs into a readable response
     fn format_multi_cluster_output(&self, outputs: &[ToolOutput], clusters: &[String]) -> String {
-        let mut result = String::from("## 多集群查询结果\n\n");
-        result += &format!("| 集群 | 状态 | 摘要 |\n");
-        result += &format!("|------|------|------|\n");
+        let mut result = String::from(messages::MULTI_CLUSTER_TITLE);
+        result += messages::MULTI_CLUSTER_HEADER;
 
         for (i, output) in outputs.iter().enumerate() {
             let cluster = if i < clusters.len() {
@@ -1182,11 +1256,14 @@ impl AgentOrchestrator {
             };
 
             let status = if output.success { "✅" } else { "❌" };
-            let summary = if output.content.len() > 100 {
-                format!("{}...", &output.content[..100])
-            } else {
-                output.content.clone()
-            }.replace("\n", " ");
+            let summary = {
+                let s = crate::utils::string::utf8_prefix_chars(&output.content, 100);
+                if output.content.chars().count() > 100 {
+                    format!("{}...", s)
+                } else {
+                    s.to_string()
+                }
+            }.replace('\n', " ");
 
             result += &format!("| {} | {} | {} |\n", cluster, status, summary);
         }

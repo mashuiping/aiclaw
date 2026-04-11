@@ -3,8 +3,10 @@
 use std::sync::Arc;
 use tracing::debug;
 
+use aiclaw_types::skill::SkillMetadata;
 use crate::llm::traits::LLMProvider;
 use crate::llm::types::{ChatMessage, ChatOptions, Usage};
+use super::prompt_builder::PromptBuilder;
 
 /// Execution plan - defines what queries to run
 #[derive(Debug, Clone)]
@@ -17,21 +19,9 @@ pub struct ExecutionPlan {
 pub struct PlanStep {
     pub step_id: usize,
     pub description: String,
-    pub query_type: QueryType,
+    /// The actual shell command the LLM decided to run (e.g. `kubectl get pod ...`).
+    pub command: String,
     pub parameters: Vec<QueryParameter>,
-}
-
-#[derive(Debug, Clone)]
-pub enum QueryType {
-    PodLogs,
-    PodDescribe,
-    PodEvents,
-    NodeStatus,
-    DeploymentStatus,
-    ServiceStatus,
-    MetricsQuery,
-    ClusterHealth,
-    CustomQuery,
 }
 
 #[derive(Debug, Clone)]
@@ -43,61 +33,43 @@ pub struct QueryParameter {
 /// Planner - creates execution plans for complex queries
 pub struct Planner {
     provider: Arc<dyn LLMProvider>,
+    prompt_builder: PromptBuilder,
 }
 
 impl Planner {
     pub fn new(provider: Arc<dyn LLMProvider>) -> Self {
-        Self { provider }
+        Self {
+            provider,
+            prompt_builder: PromptBuilder::new(),
+        }
     }
 
-    /// Create an execution plan from user intent
-    pub async fn plan(&self, user_query: &str, intent_type: &str) -> anyhow::Result<(ExecutionPlan, Usage)> {
+    /// Create an execution plan from user intent, dynamically incorporating
+    /// relevant skills and tools into the prompt.
+    pub async fn plan(
+        &self,
+        user_query: &str,
+        intent_type: &str,
+        matched_skills: &[&SkillMetadata],
+    ) -> anyhow::Result<(ExecutionPlan, Usage)> {
         debug!("Creating execution plan for: {}", user_query);
 
-        let prompt = format!(
-            r#"用户请求：{}
-意图类型：{}
+        // Collect tools from matched skills
+        let tools: Vec<&aiclaw_types::skill::SkillTool> = matched_skills
+            .iter()
+            .flat_map(|s| s.tools.iter())
+            .collect();
 
-你是一个运维排查专家。用户描述了一个问题，你需要规划需要执行哪些查询来帮助诊断。
+        let system_prompt = self.prompt_builder.build_planner_prompt(matched_skills, &tools);
 
-可用的查询类型：
-- pod_logs: 查询 Pod 日志（需要 pod_name, namespace）
-- pod_describe: 获取 Pod 详细信息（需要 pod_name, namespace）
-- pod_events: 查看 Pod 相关事件（需要 pod_name, namespace）
-- node_status: 查看 Node 状态（需要 node_name）
-- deployment_status: 查看 Deployment 状态（需要 deployment_name, namespace）
-- service_status: 查看 Service 状态（需要 service_name, namespace）
-- metrics_query: 查询指标数据（需要 query 表达式）
-- cluster_health: 检查集群健康状态
-- custom_query: 自定义查询
-
-请分析问题并规划查询步骤。
-
-直接返回 JSON 格式，不要有其他内容：
-{{
-    "reasoning": "你的分析思路",
-    "steps": [
-        {{
-            "description": "步骤描述",
-            "query_type": "查询类型",
-            "parameters": [
-                {{"name": "参数名", "value": "参数值"}}
-            ]
-        }}
-    ]
-}}
-
-注意：
-- 步骤数量根据问题复杂度决定，通常 2-5 个步骤
-- 参数值如果不确定，使用占位符如 {{pod_name}}
-- 如果问题简单，可以只有 1 个步骤
-- 先查基础状态，再查详细日志/指标"#,
+        let user_prompt = format!(
+            "User request: {}\nIntent type: {}\n\nAnalyze the problem and plan diagnostic steps. Return JSON directly.",
             user_query, intent_type
         );
 
         let messages = vec![
-            ChatMessage::system(PLANNER_SYSTEM_PROMPT),
-            ChatMessage::user(&prompt),
+            ChatMessage::system(&system_prompt),
+            ChatMessage::user(&user_prompt),
         ];
 
         let options = ChatOptions::new()
@@ -111,7 +83,6 @@ impl Planner {
     }
 
     async fn parse_plan(&self, response: &str) -> anyhow::Result<ExecutionPlan> {
-        // Try to extract JSON from response
         let json_str = extract_json(response)
             .ok_or_else(|| anyhow::anyhow!("Failed to extract JSON from planner response"))?;
 
@@ -124,7 +95,8 @@ impl Planner {
         #[derive(serde::Deserialize)]
         struct RawStep {
             description: String,
-            query_type: String,
+            command: String,
+            #[serde(default)]
             parameters: Vec<RawParam>,
         }
 
@@ -142,18 +114,6 @@ impl Planner {
             .into_iter()
             .enumerate()
             .map(|(i, s)| {
-                let query_type = match s.query_type.as_str() {
-                    "pod_logs" => QueryType::PodLogs,
-                    "pod_describe" => QueryType::PodDescribe,
-                    "pod_events" => QueryType::PodEvents,
-                    "node_status" => QueryType::NodeStatus,
-                    "deployment_status" => QueryType::DeploymentStatus,
-                    "service_status" => QueryType::ServiceStatus,
-                    "metrics_query" => QueryType::MetricsQuery,
-                    "cluster_health" => QueryType::ClusterHealth,
-                    _ => QueryType::CustomQuery,
-                };
-
                 let parameters = s
                     .parameters
                     .into_iter()
@@ -163,7 +123,7 @@ impl Planner {
                 PlanStep {
                     step_id: i + 1,
                     description: s.description,
-                    query_type,
+                    command: s.command,
                     parameters,
                 }
             })
@@ -211,22 +171,6 @@ fn extract_json(response: &str) -> Option<String> {
 
     None
 }
-
-const PLANNER_SYSTEM_PROMPT: &str = r#"你是一个运维排查规划专家。
-
-你的职责是分析用户问题，制定合理的查询计划，帮助快速定位根因。
-
-规划原则：
-1. 先查基础状态，再查详细信息（如先看 Pod 状态，再看日志）
-2. 相关性原则：选择与问题最相关的查询
-3. 最小化原则：用最少的查询解决问题
-4. 证据链原则：查询结果应能形成完整的证据链
-
-分析思路：
-1. 问题是什么？（如：Pod 无法启动、响应慢、502错误）
-2. 可能的原因有哪些？
-3. 需要查什么数据来验证或排除这些原因？
-4. 按什么顺序查最高效？"#;
 
 #[cfg(test)]
 mod tests {

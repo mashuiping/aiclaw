@@ -4,6 +4,8 @@ use aiclaw_types::agent::{Intent, IntentType};
 use aiclaw_types::skill::SkillMetadata;
 use std::sync::Arc;
 
+use crate::mcp::MCPClientPool;
+
 /// Routing result
 #[derive(Debug, Clone)]
 pub struct RouteResult {
@@ -36,6 +38,7 @@ impl RouteResult {
 /// Skill and MCP router - routes intents to appropriate skills or MCP tools
 pub struct Router {
     skill_registry: Arc<dyn SkillRegistryAccess>,
+    mcp_pool: Arc<MCPClientPool>,
 }
 
 pub trait SkillRegistryAccess: Send + Sync {
@@ -46,8 +49,8 @@ pub trait SkillRegistryAccess: Send + Sync {
 }
 
 impl Router {
-    pub fn new(skill_registry: Arc<dyn SkillRegistryAccess>) -> Self {
-        Self { skill_registry }
+    pub fn new(skill_registry: Arc<dyn SkillRegistryAccess>, mcp_pool: Arc<MCPClientPool>) -> Self {
+        Self { skill_registry, mcp_pool }
     }
 
     /// Route an intent to the best matching skill or MCP tool
@@ -156,52 +159,25 @@ impl Router {
         results
     }
 
-    /// Extract domain tags from intent entities
+    /// Extract domain tags from intent entities.
+    ///
+    /// Tags come directly from the LLM-classified entities. No hardcoded synonym
+    /// expansions -- the skill registry's own `domain_tags` are the source of truth.
     fn get_intent_domain_tags(&self, intent: &Intent) -> Vec<String> {
         let mut tags = Vec::new();
 
-        // Domain
         if let Some(ref domain) = intent.entities.domain {
             tags.push(domain.clone());
         }
 
-        // Virtualization
         if let Some(ref virt) = intent.entities.virtualization {
             tags.push(virt.clone());
-            // Also add common variations
-            match virt.as_str() {
-                "hami" => {
-                    tags.push("gpu".to_string());
-                    tags.push("vgpu".to_string());
-                }
-                "vgpu" => {
-                    tags.push("gpu".to_string());
-                }
-                _ => {}
-            }
         }
 
-        // Resource state - may indicate specific skill
         if let Some(ref state) = intent.entities.resource_state {
-            match state.as_str() {
-                "pending" => {
-                    // Could be scheduling issue
-                    tags.push("pending".to_string());
-                    tags.push("scheduling".to_string());
-                }
-                "crashloop" => {
-                    tags.push("crashloop".to_string());
-                    tags.push("oom".to_string());
-                }
-                "oom" => {
-                    tags.push("oom".to_string());
-                    tags.push("memory".to_string());
-                }
-                _ => {}
-            }
+            tags.push(state.clone());
         }
 
-        // Error keyword
         if let Some(ref error) = intent.entities.error_keyword {
             tags.push(error.clone());
         }
@@ -209,21 +185,32 @@ impl Router {
         tags
     }
 
-    /// Route to MCP servers/tools
+    /// Route to MCP servers/tools dynamically by matching intent keywords
+    /// against the cached tool names and descriptions from the pool.
     fn route_to_mcp(&self, intent: &Intent) -> Vec<RouteResult> {
         let mut results = Vec::new();
+        let intent_tag = match intent.intent_type {
+            IntentType::Logs => "log",
+            IntentType::Metrics => "metric",
+            IntentType::Health => "health",
+            IntentType::Query => "query",
+            _ => return results,
+        };
 
-        match intent.intent_type {
-            IntentType::Logs => {
-                results.push(RouteResult::mcp("victoriametrics", "victorialogs_query", 0.8));
+        let query_lower = intent.raw_query.to_lowercase();
+
+        for (server_name, tool_info) in self.mcp_pool.all_cached_tools() {
+            let name_lower = tool_info.name.to_lowercase();
+            let desc_lower = tool_info.description.to_lowercase();
+
+            let matches = name_lower.contains(intent_tag)
+                || desc_lower.contains(intent_tag)
+                || query_lower.split_whitespace().any(|w| name_lower.contains(w));
+
+            if matches {
+                let confidence = if name_lower.contains(intent_tag) { 0.8 } else { 0.65 };
+                results.push(RouteResult::mcp(&server_name, &tool_info.name, confidence));
             }
-            IntentType::Metrics => {
-                results.push(RouteResult::mcp("victoriametrics", "victoriametrics_query", 0.8));
-            }
-            IntentType::Health => {
-                results.push(RouteResult::mcp("victoriametrics", "victoriametrics_health", 0.7));
-            }
-            _ => {}
         }
 
         results
@@ -274,6 +261,7 @@ impl Default for Router {
     fn default() -> Self {
         Self {
             skill_registry: Arc::new(DefaultSkillRegistryAccess),
+            mcp_pool: Arc::new(MCPClientPool::new()),
         }
     }
 }
