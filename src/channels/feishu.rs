@@ -4,13 +4,167 @@ use async_trait::async_trait;
 use aiclaw_types::channel::{
     ChannelMessage, Mention, MentionType, MessageContent, MessageFormat, OutgoingContent, SendMessage, SenderInfo,
 };
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Json, Response},
+    routing::{get, post},
+    Router,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::traits::Channel;
 use crate::config::FeishuConfig;
+
+// ============================================================================
+// Feishu Webhook HTTP Handlers
+// ============================================================================
+
+#[derive(Clone)]
+struct FeishuWebhookState {
+    tx: mpsc::Sender<ChannelMessage>,
+    verify_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FeishuWebhookVerifyQuery {
+    challenge: Option<String>,
+}
+
+async fn feishu_webhook_verify(
+    Query(query): Query<FeishuWebhookVerifyQuery>,
+    State(_state): State<Arc<FeishuWebhookState>>,
+) -> Response {
+    // Feishu webhook verification challenge
+    if let Some(challenge) = query.challenge {
+        info!("Feishu webhook verification challenge received");
+        let body = serde_json::json!({ "challenge": challenge });
+        (StatusCode::OK, Json(body)).into_response()
+    } else {
+        (StatusCode::BAD_REQUEST, "Missing challenge").into_response()
+    }
+}
+
+#[derive(Deserialize)]
+struct FeishuWebhookPayload {
+    schema: Option<String>,
+    header: Option<FeishuEventHeader>,
+    event: Option<FeishuEventContent>,
+}
+
+async fn feishu_webhook_event(
+    State(state): State<Arc<FeishuWebhookState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    debug!("Feishu webhook event received: {:?}", payload);
+
+    // Try to parse as FeishuEvent first
+    if let Ok(event) = serde_json::from_value::<FeishuEvent>(payload.clone()) {
+        match forward_feishu_event(&state.tx, event).await {
+            Ok(()) => (StatusCode::OK, "ok").into_response(),
+            Err(e) => {
+                error!("Failed to forward Feishu webhook event: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to process event").into_response()
+            }
+        }
+    } else if let Ok(incoming) = serde_json::from_value::<FeishuWebhookPayload>(payload.clone()) {
+        if let (Some(header), Some(event)) = (incoming.header, incoming.event) {
+            let full_event = FeishuEvent {
+                schema: incoming.schema,
+                header,
+                event,
+            };
+            match forward_feishu_event(&state.tx, full_event).await {
+                Ok(()) => (StatusCode::OK, "ok").into_response(),
+                Err(e) => {
+                    error!("Failed to forward Feishu webhook event: {}", e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Failed to process event").into_response()
+                }
+            }
+        } else {
+            warn!("Feishu webhook: missing header or event in payload");
+            (StatusCode::BAD_REQUEST, "Missing header or event").into_response()
+        }
+    } else {
+        warn!("Feishu webhook: unhandled payload format");
+        (StatusCode::BAD_REQUEST, "Unsupported payload format").into_response()
+    }
+}
+
+async fn forward_feishu_event(
+    tx: &mpsc::Sender<ChannelMessage>,
+    event: FeishuEvent,
+) -> anyhow::Result<()> {
+    // Extract all needed fields from event before consuming event.event.message
+    let sender = event.event.sender.clone();
+    let mentions = event.event.mentions.clone();
+
+    if let Some(message) = event.event.message {
+        let content: serde_json::Value = serde_json::from_str(&message.content)?;
+        let text = content.get("text").and_then(|t| t.as_str()).unwrap_or("");
+        let message_id = message.message_id.clone();
+        let chat_id = message.chat_id.clone();
+        let thread_id = message.parent_id.clone().or(message.root_id.clone());
+        let message_raw = message.clone();
+
+        let sender_info = sender.as_ref()
+            .map(|s| SenderInfo {
+                user_id: s.sender_id.open_id.clone(),
+                username: s.sender_id.open_id.clone(),
+                display_name: None,
+                is_bot: s.sender_type == "bot",
+            })
+            .unwrap_or_else(|| SenderInfo {
+                user_id: "unknown".to_string(),
+                username: "unknown".to_string(),
+                display_name: None,
+                is_bot: false,
+            });
+
+        let mentions_list = mentions.as_ref()
+            .map(|mentions| {
+                mentions.iter().map(|m| Mention {
+                    id: m.id.open_id.clone().unwrap_or_default(),
+                    name: m.key.clone(),
+                    mention_type: if m.mention_type == "at" {
+                        MentionType::User
+                    } else {
+                        MentionType::User
+                    },
+                }).collect()
+            })
+            .unwrap_or_default();
+
+        let channel_msg = ChannelMessage {
+            id: message_id,
+            channel_name: "feishu".to_string(),
+            channel_id: chat_id,
+            sender: sender_info,
+            content: MessageContent {
+                text: text.to_string(),
+                mentions: mentions_list,
+                attachments: Vec::new(),
+            },
+            timestamp: Utc::now(),
+            thread_id,
+            mentions_bot: true,
+            raw: serde_json::to_value(&message_raw)?,
+        };
+
+        tx.send(channel_msg).await?;
+    } else {
+        debug!("Feishu event dropped: no message in event");
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Feishu Channel Implementation
+// ============================================================================
 
 /// Feishu channel implementation
 pub struct FeishuChannel {
@@ -171,16 +325,7 @@ impl Channel for FeishuChannel {
 
     async fn listen(&self, tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
         info!("Starting Feishu listener for channel {}", self.name);
-
-        if self.config.webhook_url.is_some() {
-            self.listen_webhook(tx).await?;
-        } else if self.config.polling_timeout_secs > 0 {
-            self.listen_long_polling(tx).await?;
-        } else {
-            warn!("Feishu channel {} has no active listening mode configured", self.name);
-        }
-
-        Ok(())
+        self.listen_webhook(tx).await
     }
 
     async fn health_check(&self) -> bool {
@@ -201,123 +346,28 @@ impl Channel for FeishuChannel {
 }
 
 impl FeishuChannel {
-    async fn listen_webhook(&self, _tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
-        info!("Feishu webhook listener started (passive mode)");
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        }
-    }
+    async fn listen_webhook(&self, tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+        let bind = self.config.webhook_listen_addr.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Feishu webhook_listen_addr not configured"))?;
 
-    async fn listen_long_polling(&self, tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
-        info!("Feishu long polling listener started");
+        info!("Feishu webhook listener starting on {}", bind);
 
-        let app_id = self.config.app_id.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Feishu app_id not configured"))?;
-        let app_secret = self.config.app_secret.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Feishu app_secret not configured"))?;
+        let state = FeishuWebhookState {
+            tx,
+            verify_token: self.config.verify_token.clone(),
+        };
 
-        let tenant_access_token = self.get_tenant_access_token(app_id, app_secret).await?;
+        let app = Router::new()
+            .route("/webhook", get(feishu_webhook_verify))
+            .route("/webhook", post(feishu_webhook_event))
+            .with_state(Arc::new(state));
 
-        loop {
-            match self.fetch_long_polling_events(&tenant_access_token).await {
-                Ok(events) => {
-                    for event in events {
-                        if let Err(e) = self.process_event(&tx, event).await {
-                            error!("Error processing Feishu event: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Feishu long polling error: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                }
-            }
-        }
-    }
+        let addr: std::net::SocketAddr = bind.parse()
+            .map_err(|_| anyhow::anyhow!("Invalid socket address: {}", bind))?;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        info!("Feishu webhook server listening on {}", addr);
 
-    async fn get_tenant_access_token(&self, app_id: &str, app_secret: &str) -> anyhow::Result<String> {
-        let client = reqwest::Client::new();
-        let response = client
-            .post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal")
-            .json(&serde_json::json!({
-                "app_id": app_id,
-                "app_secret": app_secret
-            }))
-            .send()
-            .await?;
-
-        #[derive(Deserialize)]
-        struct TokenResponse {
-            #[allow(dead_code)]
-            code: i32,
-            msg: String,
-            tenant_access_token: Option<String>,
-        }
-
-        let token_resp: TokenResponse = response.json().await?;
-        token_resp.tenant_access_token
-            .ok_or_else(|| anyhow::anyhow!("Failed to get tenant access token: {}", token_resp.msg))
-    }
-
-    async fn fetch_long_polling_events(&self, _token: &str) -> anyhow::Result<Vec<FeishuEvent>> {
-        Ok(Vec::new())
-    }
-
-    async fn process_event(&self, tx: &mpsc::Sender<ChannelMessage>, event: FeishuEvent) -> anyhow::Result<()> {
-        if let Some(message) = event.event.message {
-            let content: serde_json::Value = serde_json::from_str(&message.content)?;
-            let text = content.get("text").and_then(|t| t.as_str()).unwrap_or("");
-            let message_id = message.message_id.clone();
-            let chat_id = message.chat_id.clone();
-            let thread_id = message.parent_id.clone().or(message.root_id.clone());
-            let message_raw = message.clone();
-
-            let sender = event.event.sender.as_ref()
-                .map(|s| SenderInfo {
-                    user_id: s.sender_id.open_id.clone(),
-                    username: s.sender_id.open_id.clone(),
-                    display_name: None,
-                    is_bot: s.sender_type == "bot",
-                })
-                .unwrap_or_else(|| SenderInfo {
-                    user_id: "unknown".to_string(),
-                    username: "unknown".to_string(),
-                    display_name: None,
-                    is_bot: false,
-                });
-
-            let mentions = event.event.mentions.as_ref()
-                .map(|mentions| {
-                    mentions.iter().map(|m| Mention {
-                        id: m.id.open_id.clone().unwrap_or_default(),
-                        name: m.key.clone(),
-                        mention_type: if m.mention_type == "at" {
-                            MentionType::User
-                        } else {
-                            MentionType::User
-                        },
-                    }).collect()
-                })
-                .unwrap_or_default();
-
-            let channel_msg = ChannelMessage {
-                id: message_id,
-                channel_name: self.name.clone(),
-                channel_id: chat_id,
-                sender,
-                content: MessageContent {
-                    text: text.to_string(),
-                    mentions,
-                    attachments: Vec::new(),
-                },
-                timestamp: Utc::now(),
-                thread_id,
-                mentions_bot: true,
-                raw: serde_json::to_value(&message_raw)?,
-            };
-
-            tx.send(channel_msg).await?;
-        }
+        axum::serve(listener, app).await?;
         Ok(())
     }
 }

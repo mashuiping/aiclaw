@@ -5,13 +5,100 @@ use aiclaw_types::channel::{
     ChannelMessage,
     MessageContent, MessageFormat, OutgoingContent, SendMessage, SenderInfo,
 };
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Json, Response},
+    routing::post,
+    Router,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::traits::Channel;
 use crate::config::WeComConfig;
+
+// ============================================================================
+// WeCom Webhook HTTP Handlers
+// ============================================================================
+
+#[derive(Clone)]
+struct WeComWebhookState {
+    tx: mpsc::Sender<ChannelMessage>,
+    name: String,
+}
+
+/// WeCom webhook payload - can be JSON or XML formatted
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeComIncomingMessage {
+    pub msg_type: String,
+    pub agent_id: u64,
+    pub content: String,
+    pub from_username: String,
+    pub create_time: u64,
+    pub chat_id: Option<String>,
+    pub msg_id: Option<String>,
+    #[serde(rename = "toUsername")]
+    pub to_username: Option<String>,
+}
+
+async fn wecom_webhook_event(
+    State(state): State<Arc<WeComWebhookState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    debug!("WeCom webhook event received: {:?}", payload);
+
+    // Try to parse as WeComIncomingMessage
+    if let Ok(message) = serde_json::from_value::<WeComIncomingMessage>(payload) {
+        match forward_wecom_message(&state.tx, &state.name, message).await {
+            Ok(()) => (StatusCode::OK, "ok").into_response(),
+            Err(e) => {
+                error!("Failed to forward WeCom webhook message: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to process event").into_response()
+            }
+        }
+    } else {
+        warn!("WeCom webhook: failed to parse payload");
+        (StatusCode::BAD_REQUEST, "Failed to parse payload").into_response()
+    }
+}
+
+async fn forward_wecom_message(
+    tx: &mpsc::Sender<ChannelMessage>,
+    channel_name: &str,
+    message: WeComIncomingMessage,
+) -> anyhow::Result<()> {
+    let channel_msg = ChannelMessage {
+        id: message.msg_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        channel_name: channel_name.to_string(),
+        channel_id: message.chat_id.clone().unwrap_or_default(),
+        sender: SenderInfo {
+            user_id: message.from_username.clone(),
+            username: message.from_username.clone(),
+            display_name: None,
+            is_bot: false,
+        },
+        content: MessageContent {
+            text: message.content.clone(),
+            mentions: Vec::new(),
+            attachments: Vec::new(),
+        },
+        timestamp: Utc::now(),
+        thread_id: None,
+        mentions_bot: true,
+        raw: serde_json::to_value(&message)?,
+    };
+
+    tx.send(channel_msg).await?;
+    Ok(())
+}
+
+// ============================================================================
+// WeCom Channel Implementation
+// ============================================================================
 
 /// WeCom channel implementation
 pub struct WeComChannel {
@@ -26,19 +113,6 @@ impl WeComChannel {
             config,
         })
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WeComIncomingMessage {
-    pub msg_type: String,
-    pub agent_id: u64,
-    pub content: String,
-    pub from_username: String,
-    pub create_time: u64,
-    pub chat_id: Option<String>,
-    pub msg_id: Option<String>,
-    #[serde(rename = "toUsername")]
-    pub to_username: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,10 +206,10 @@ impl Channel for WeComChannel {
     async fn listen(&self, tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
         info!("Starting WeCom listener for channel {}", self.name);
 
-        if self.config.webhook_url.is_some() {
+        if self.config.webhook_listen_addr.is_some() {
             self.listen_webhook(tx).await?;
         } else {
-            warn!("WeCom channel {} has no webhook URL configured", self.name);
+            warn!("WeCom channel {} has no webhook_listen_addr configured", self.name);
         }
 
         Ok(())
@@ -159,41 +233,27 @@ impl Channel for WeComChannel {
 }
 
 impl WeComChannel {
-    async fn listen_webhook(&self, _tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
-        info!("WeCom webhook listener started (passive mode - use HTTP server for webhook endpoint)");
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        }
-    }
+    async fn listen_webhook(&self, tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+        let bind = self.config.webhook_listen_addr.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("WeCom webhook_listen_addr not configured"))?;
 
-    pub async fn handle_webhook(
-        &self,
-        message: WeComIncomingMessage,
-        tx: &mpsc::Sender<ChannelMessage>,
-    ) -> anyhow::Result<()> {
-        let msg_clone = message.clone();
-        let channel_msg = ChannelMessage {
-            id: message.msg_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            channel_name: self.name.clone(),
-            channel_id: message.chat_id.clone().unwrap_or_default(),
-            sender: SenderInfo {
-                user_id: message.from_username.clone(),
-                username: message.from_username.clone(),
-                display_name: None,
-                is_bot: false,
-            },
-            content: MessageContent {
-                text: message.content.clone(),
-                mentions: Vec::new(),
-                attachments: Vec::new(),
-            },
-            timestamp: Utc::now(),
-            thread_id: None,
-            mentions_bot: true,
-            raw: serde_json::to_value(&msg_clone)?,
+        info!("WeCom webhook listener starting on {}", bind);
+
+        let state = WeComWebhookState {
+            tx,
+            name: self.name.clone(),
         };
 
-        tx.send(channel_msg).await?;
+        let app = Router::new()
+            .route("/webhook", post(wecom_webhook_event))
+            .with_state(Arc::new(state));
+
+        let addr: std::net::SocketAddr = bind.parse()
+            .map_err(|_| anyhow::anyhow!("Invalid socket address: {}", bind))?;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        info!("WeCom webhook server listening on {}", addr);
+
+        axum::serve(listener, app).await?;
         Ok(())
     }
 }

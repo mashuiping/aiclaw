@@ -315,6 +315,10 @@ pub struct FeishuConfig {
     #[serde(default)]
     pub webhook_url: Option<String>,
 
+    /// Local address to listen for incoming Feishu webhooks (e.g., "0.0.0.0:8089")
+    #[serde(default, alias = "webhook_listen_addr")]
+    pub webhook_listen_addr: Option<String>,
+
     #[serde(default, alias = "long_polling_timeout_secs")]
     pub polling_timeout_secs: u64,
 }
@@ -334,6 +338,10 @@ pub struct WeComConfig {
 
     #[serde(default)]
     pub webhook_url: Option<String>,
+
+    /// Local address to listen for incoming WeCom webhooks (e.g., "0.0.0.0:8090")
+    #[serde(default, alias = "webhook_listen_addr")]
+    pub webhook_listen_addr: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
