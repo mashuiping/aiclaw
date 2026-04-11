@@ -8,8 +8,6 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct RouteResult {
     pub skill_name: Option<String>,
-    pub mcp_server: Option<String>,
-    pub tool_name: Option<String>,
     pub confidence: f32,
 }
 
@@ -17,17 +15,6 @@ impl RouteResult {
     pub fn skill(name: &str, confidence: f32) -> Self {
         Self {
             skill_name: Some(name.to_string()),
-            mcp_server: None,
-            tool_name: None,
-            confidence,
-        }
-    }
-
-    pub fn mcp(server: &str, tool: &str, confidence: f32) -> Self {
-        Self {
-            skill_name: None,
-            mcp_server: Some(server.to_string()),
-            tool_name: Some(tool.to_string()),
             confidence,
         }
     }
@@ -56,9 +43,6 @@ impl Router {
 
         let skill_results = self.route_to_skill(intent);
         results.extend(skill_results);
-
-        let mcp_results = self.route_to_mcp(intent);
-        results.extend(mcp_results);
 
         results.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
         results.truncate(3);
@@ -207,26 +191,6 @@ impl Router {
         }
 
         tags
-    }
-
-    /// Route to MCP servers/tools
-    fn route_to_mcp(&self, intent: &Intent) -> Vec<RouteResult> {
-        let mut results = Vec::new();
-
-        match intent.intent_type {
-            IntentType::Logs => {
-                results.push(RouteResult::mcp("victoriametrics", "victorialogs_query", 0.8));
-            }
-            IntentType::Metrics => {
-                results.push(RouteResult::mcp("victoriametrics", "victoriametrics_query", 0.8));
-            }
-            IntentType::Health => {
-                results.push(RouteResult::mcp("victoriametrics", "victoriametrics_health", 0.7));
-            }
-            _ => {}
-        }
-
-        results
     }
 
     /// Calculate confidence for a skill matching an intent

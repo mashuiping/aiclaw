@@ -6,7 +6,7 @@
 
 use aiclaw::{
     channels::Channel, default_chat_provider, AgentOrchestrator, AIOpsProviderFactory,
-    ChannelFactory, Config, MCPClient, MCPClientPool, Observer, SkillLoader,
+    ChannelFactory, Config, Observer, SkillLoader,
     SkillRegistry, SessionManager,
 };
 use clap::Parser;
@@ -106,24 +106,6 @@ AI Ops Agent v{}
         Err(e) => error!("Failed to load skills: {}", e),
     }
 
-    // --- MCP ---
-    let mut mcp_pool = MCPClientPool::new();
-    for (name, server_config) in &config.mcp.servers {
-        if server_config.enabled {
-            let client = Arc::new(MCPClient::new(name));
-            if let Err(e) = client
-                .start_stdio(&server_config.command, &server_config.args, &server_config.env)
-                .await
-            {
-                error!("Failed to start MCP server {}: {}", name, e);
-            } else {
-                mcp_pool.add(name.clone(), client);
-                info!("Started MCP server: {}", name);
-            }
-        }
-    }
-    let mcp_pool = Arc::new(mcp_pool);
-
     // --- LLM provider ---
     let llm_provider = match default_chat_provider(&config) {
         Ok(p) => p,
@@ -142,13 +124,12 @@ AI Ops Agent v{}
             &config,
             llm_provider,
             skill_registry,
-            mcp_pool,
             kubeconfig,
         )
         .await
     } else {
         info!("Starting in service mode");
-        run_service(config, llm_provider, skill_registry, mcp_pool, kubeconfig).await
+        run_service(config, llm_provider, skill_registry, kubeconfig).await
     }
 }
 
@@ -182,7 +163,6 @@ async fn run_service(
     config: Config,
     llm_provider: Option<Arc<dyn aiclaw::LLMProvider>>,
     skill_registry: Arc<SkillRegistry>,
-    mcp_pool: Arc<MCPClientPool>,
     kubeconfig: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let observer: Arc<dyn Observer> = Arc::new(aiclaw::LogObserver::new("aiclaw"));
@@ -213,7 +193,6 @@ async fn run_service(
             &config.agent.name,
             session_manager.clone(),
             skill_registry.clone(),
-            mcp_pool.clone(),
             aiops_providers,
             clusters,
             channels,
@@ -228,7 +207,6 @@ async fn run_service(
             &config.agent.name,
             session_manager,
             skill_registry,
-            mcp_pool,
             aiops_providers,
             clusters,
             channels,

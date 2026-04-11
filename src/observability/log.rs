@@ -70,13 +70,8 @@ impl LogObserver {
             }
             ObserverEvent::SkillExecutionEnd { skill, duration, success } => {
                 let status = if *success { "success" } else { "failure" };
-                format!("[{}] INFO {} - Skill {} completed in {:?}: {}", 
+                format!("[{}] INFO {} - Skill {} completed in {:?}: {}",
                     timestamp, self.name, skill, duration, status)
-            }
-            ObserverEvent::McpCall { server, tool, duration, success } => {
-                let status = if *success { "success" } else { "failure" };
-                format!("[{}] DEBUG {} - MCP call to {} (tool: {}) in {:?}: {}", 
-                    timestamp, self.name, server, tool, duration, status)
             }
         }
     }

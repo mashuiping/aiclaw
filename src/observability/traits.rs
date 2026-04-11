@@ -61,12 +61,6 @@ pub enum ObserverEvent {
         duration: Duration,
         success: bool,
     },
-    McpCall {
-        server: String,
-        tool: String,
-        duration: Duration,
-        success: bool,
-    },
 }
 
 /// Message direction

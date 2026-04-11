@@ -11,7 +11,6 @@ pub mod channels;
 pub mod config;
 pub mod feedback;
 pub mod llm;
-pub mod mcp;
 pub mod observability;
 pub mod repl;
 
@@ -25,7 +24,6 @@ pub use channels::*;
 pub use config::*;
 pub use feedback::*;
 pub use llm::*;
-pub use mcp::*;
 pub use observability::*;
 pub use security::*;
 pub use skills::*;

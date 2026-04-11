@@ -171,9 +171,6 @@ pub struct Config {
     pub skills: SkillsConfig,
 
     #[serde(default)]
-    pub mcp: MCPConfig,
-
-    #[serde(default)]
     pub aiops: HashMap<String, AIOpsProviderConfig>,
 
     /// Logical cluster name → kubectl `--context` mapping (host `kubectl` only; no in-process K8s client).
@@ -458,33 +455,6 @@ fn default_open_skills_enabled() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct MCPConfig {
-    #[serde(default)]
-    pub servers: HashMap<String, MCPServerConfig>,
-
-    #[serde(default)]
-    pub transport: MCPTransport,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(tag = "transport_type")]
-pub enum MCPTransport {
-    #[default]
-    Stdio,
-    SSE { url: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct MCPServerConfig {
-    pub enabled: bool,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AIOpsProviderConfig {
     pub enabled: bool,
     pub provider_type: String,
@@ -608,7 +578,6 @@ impl Default for Config {
             agent: AgentConfig::default(),
             channels: HashMap::new(),
             skills: SkillsConfig::default(),
-            mcp: MCPConfig::default(),
             aiops: HashMap::new(),
             clusters: HashMap::new(),
             observability: ObservabilityConfig::default(),
@@ -640,15 +609,6 @@ impl Default for SkillsConfig {
             allowed_scripts: false,
             trusted_skill_roots: Vec::new(),
             exec: SkillsExecConfig::default(),
-        }
-    }
-}
-
-impl Default for MCPConfig {
-    fn default() -> Self {
-        Self {
-            servers: HashMap::new(),
-            transport: MCPTransport::Stdio,
         }
     }
 }

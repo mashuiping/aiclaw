@@ -20,7 +20,6 @@ use crate::config::{ClusterConfig, SkillsExecConfig};
 use crate::llm::summarizer::{Summarizer, ToolOutput};
 use crate::llm::traits::LLMProvider;
 use crate::llm::types::Usage;
-use crate::mcp::MCPClientPool;
 use crate::observability::{Observer, ObserverEvent};
 use crate::skills::{
     apply_kubectl_context, skill_executor_for_config, LLMSkillExecutor, SkillExecutor, SkillRegistry,
@@ -34,7 +33,6 @@ pub struct AgentOrchestrator {
     intent_parser: IntentParser,
     router: Arc<Router>,
     skill_registry: Arc<SkillRegistry>,
-    mcp_pool: Arc<MCPClientPool>,
     _aiops_providers: HashMap<String, Box<dyn AIOpsProvider>>,
     clusters: HashMap<String, ClusterConfig>,
     pub channels: HashMap<String, Arc<dyn Channel>>,
@@ -54,7 +52,6 @@ impl AgentOrchestrator {
         name: impl Into<String>,
         session_manager: Arc<SessionManager>,
         skill_registry: Arc<SkillRegistry>,
-        mcp_pool: Arc<MCPClientPool>,
         _aiops_providers: HashMap<String, Box<dyn AIOpsProvider>>,
         clusters: HashMap<String, ClusterConfig>,
         channels: HashMap<String, Arc<dyn Channel>>,
@@ -69,7 +66,6 @@ impl AgentOrchestrator {
             intent_parser: IntentParser::new(),
             router: Arc::new(Router::new(skill_registry.clone())),
             skill_registry,
-            mcp_pool,
             _aiops_providers,
             clusters,
             channels,
@@ -88,7 +84,6 @@ impl AgentOrchestrator {
         name: impl Into<String>,
         session_manager: Arc<SessionManager>,
         skill_registry: Arc<SkillRegistry>,
-        mcp_pool: Arc<MCPClientPool>,
         aiops_providers: HashMap<String, Box<dyn AIOpsProvider>>,
         clusters: HashMap<String, ClusterConfig>,
         channels: HashMap<String, Arc<dyn Channel>>,
@@ -124,7 +119,6 @@ impl AgentOrchestrator {
             intent_parser,
             router: Arc::new(Router::new(skill_registry.clone())),
             skill_registry,
-            mcp_pool,
             _aiops_providers: aiops_providers,
             clusters,
             channels,
@@ -455,23 +449,6 @@ impl AgentOrchestrator {
                         success = false;
                     }
                 }
-            } else if let (Some(ref mcp_server), Some(ref tool_name)) = (&route.mcp_server, &route.tool_name) {
-                match self.execute_mcp_tool(mcp_server, tool_name, message, intent).await {
-                    Ok((text, evidence)) => {
-                        raw_response_text = text.clone();
-                        all_evidence.extend(evidence);
-                        tool_outputs.push(ToolOutput::new(
-                            format!("{}/{}", mcp_server, tool_name),
-                            text,
-                            true,
-                        ));
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("MCP tool {}:{} failed: {}", mcp_server, tool_name, e);
-                        success = false;
-                    }
-                }
             }
         }
 
@@ -729,69 +706,6 @@ impl AgentOrchestrator {
         }
 
         Ok(results)
-    }
-
-    /// Execute MCP tool
-    async fn execute_mcp_tool(
-        &self,
-        mcp_server: &str,
-        tool_name: &str,
-        _message: &ChannelMessage,
-        intent: &Intent,
-    ) -> anyhow::Result<(String, Vec<aiclaw_types::agent::EvidenceRecord>)> {
-        info!("Executing MCP tool: {}:{}", mcp_server, tool_name);
-
-        let client = self.mcp_pool.get(mcp_server)
-            .ok_or_else(|| anyhow::anyhow!("MCP server not found: {}", mcp_server))?;
-
-        let mut args = HashMap::new();
-        if let Some(ref query) = intent.entities.query {
-            args.insert("query".to_string(), serde_json::json!(query.clone()));
-        }
-        if let Some(ref pod) = intent.entities.pod_name {
-            args.insert("pod".to_string(), serde_json::json!(pod.clone()));
-        }
-        if let Some(ref ns) = intent.entities.namespace {
-            args.insert("namespace".to_string(), serde_json::json!(ns.clone()));
-        }
-
-        let start = std::time::Instant::now();
-        let result = client.call_tool(tool_name, args).await;
-        let duration = start.elapsed();
-
-        let evidence = vec![aiclaw_types::agent::EvidenceRecord {
-            timestamp: Utc::now(),
-            source: "mcp".to_string(),
-            action: tool_name.to_string(),
-            data: serde_json::json!({
-                "server": mcp_server,
-                "duration_ms": duration.as_millis(),
-            }),
-        }];
-
-        match result {
-            Ok(value) => {
-                self.observer.record_event(ObserverEvent::McpCall {
-                    server: mcp_server.to_string(),
-                    tool: tool_name.to_string(),
-                    duration,
-                    success: true,
-                });
-
-                let output = serde_json::to_string_pretty(&value)?;
-                Ok((output, evidence))
-            }
-            Err(e) => {
-                self.observer.record_event(ObserverEvent::McpCall {
-                    server: mcp_server.to_string(),
-                    tool: tool_name.to_string(),
-                    duration,
-                    success: false,
-                });
-
-                Err(e)
-            }
-        }
     }
 
     /// Execute using planner-based approach (for Debug intents)
