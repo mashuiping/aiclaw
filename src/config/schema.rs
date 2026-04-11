@@ -390,6 +390,9 @@ pub struct SkillsExecConfig {
     /// When `security = allowlist`, also allow `helm list|get|status|version` style reads.
     #[serde(default)]
     pub allow_helm: bool,
+    /// VictoriaMetrics connection for LLM-driven skill execution.
+    #[serde(default)]
+    pub victoriametrics: VictoriametricsConfig,
 }
 
 fn default_skills_exec_max_steps() -> usize {
@@ -398,6 +401,35 @@ fn default_skills_exec_max_steps() -> usize {
 
 fn default_skills_exec_timeout_secs() -> u64 {
     120
+}
+
+/// VictoriaMetrics connection settings for skill shell execution.
+/// These are injected as environment variables (VM_URL, VM_AUTH_HEADER) when
+/// LLM-driven skills execute curl commands against VictoriaMetrics.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VictoriametricsConfig {
+    /// Base URL for VictoriaMetrics /select/X/prometheus endpoint (cluster) or
+    /// http://host:8428 (single-node). Example: https://vmselect.example.com/select/0/prometheus
+    #[serde(default)]
+    pub vm_metrics_url: Option<String>,
+    /// Base URL for VictoriaLogs /select/logsql endpoint.
+    /// Example: https://vlselect.example.com
+    #[serde(default)]
+    pub vm_logs_url: Option<String>,
+    /// Optional auth header value, e.g. "Bearer <token>".
+    /// When empty, no Authorization header is sent.
+    #[serde(default)]
+    pub vm_auth_header: Option<String>,
+}
+
+impl Default for VictoriametricsConfig {
+    fn default() -> Self {
+        Self {
+            vm_metrics_url: None,
+            vm_logs_url: None,
+            vm_auth_header: None,
+        }
+    }
 }
 
 impl Default for SkillsExecConfig {
@@ -409,6 +441,7 @@ impl Default for SkillsExecConfig {
             timeout_secs: default_skills_exec_timeout_secs(),
             prepend_kubectl_context: false,
             allow_helm: false,
+            victoriametrics: VictoriametricsConfig::default(),
         }
     }
 }

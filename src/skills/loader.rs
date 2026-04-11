@@ -172,7 +172,7 @@ fn extract_applicability(body: &str) -> Vec<String> {
         let trimmed = line.trim();
 
         // Check for section header
-        if trimmed == "## 适用场景" || trimmed == "## 适用场景" || trimmed.to_lowercase().contains("适用场景") {
+        if trimmed == "## 适用场景" || trimmed.contains("适用场景") {
             in_section = true;
             continue;
         }

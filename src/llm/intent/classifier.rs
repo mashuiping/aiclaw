@@ -56,14 +56,16 @@ impl IntentClassifierImpl {
             let remaining = &content[start..];
             // Find matching closing brace
             let mut depth = 0;
-            for (i, c) in remaining.chars().enumerate() {
-                if c == '{' {
-                    depth += 1;
-                } else if c == '}' {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(remaining[..=i].to_string());
+            for (byte_idx, c) in remaining.char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(remaining[..=byte_idx].to_string());
+                        }
                     }
+                    _ => {}
                 }
             }
         }
