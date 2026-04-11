@@ -176,8 +176,10 @@ pub struct Config {
     #[serde(default)]
     pub aiops: HashMap<String, AIOpsProviderConfig>,
 
-    #[serde(default)]
-    pub kubernetes: HashMap<String, K8sClusterConfig>,
+    /// Logical cluster name → kubectl `--context` mapping (host `kubectl` only; no in-process K8s client).
+    /// TOML: `[clusters.<name>]`; legacy `[kubernetes.<name>]` is accepted via `alias`.
+    #[serde(default, alias = "kubernetes")]
+    pub clusters: HashMap<String, ClusterConfig>,
 
     #[serde(default)]
     pub observability: ObservabilityConfig,
@@ -190,6 +192,34 @@ pub struct Config {
 
     #[serde(default)]
     pub llm: LLMConfig,
+}
+
+fn channel_config_enabled(c: &ChannelConfig) -> bool {
+    match c {
+        ChannelConfig::Feishu(f) => f.enabled,
+        ChannelConfig::WeCom(w) => w.enabled,
+        ChannelConfig::Local(l) => l.enabled,
+    }
+}
+
+impl Config {
+    /// Bounded capacity for the agent inbound queue. When **only** `[channels.*]` is a single enabled
+    /// local **stdio** channel, use `1` so an extra typed line blocks until the current turn finishes.
+    pub fn agent_message_channel_capacity(&self) -> usize {
+        let enabled: Vec<&ChannelConfig> = self
+            .channels
+            .values()
+            .filter(|c| channel_config_enabled(c))
+            .collect();
+        if enabled.len() == 1 {
+            if let ChannelConfig::Local(l) = enabled[0] {
+                if l.mode == LocalChannelMode::Stdio {
+                    return 1;
+                }
+            }
+        }
+        100
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -227,6 +257,40 @@ fn default_concurrent_limit() -> usize {
 pub enum ChannelConfig {
     Feishu(FeishuConfig),
     WeCom(WeComConfig),
+    Local(LocalConfig),
+}
+
+/// Local terminal or WebSocket gateway (see `LocalChannel`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LocalChannelMode {
+    /// Read user lines from stdin; print assistant replies to stdout.
+    #[default]
+    Stdio,
+    /// Bind HTTP + `/ws` WebSocket on `bind`:`port`.
+    Http,
+}
+
+fn default_local_bind() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_local_port() -> u16 {
+    18789
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LocalConfig {
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub mode: LocalChannelMode,
+
+    #[serde(default = "default_local_bind")]
+    pub bind: String,
+
+    #[serde(default = "default_local_port")]
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -288,6 +352,65 @@ pub struct SkillsConfig {
 
     #[serde(default)]
     pub trusted_skill_roots: Vec<PathBuf>,
+
+    /// LLM-driven shell execution policy (OpenClaw-style `tools.exec` subset).
+    #[serde(default)]
+    pub exec: SkillsExecConfig,
+}
+
+/// Controls how skill-driven shell commands are validated before execution.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillsExecSecurity {
+    /// Reject every shell command (policy kill-switch).
+    Deny,
+    /// Use kubectl/helm allowlists and blocked substrings (recommended for production).
+    #[default]
+    Allowlist,
+    /// Allow any base command except blocked keywords / pipes (development only).
+    Full,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SkillsExecConfig {
+    /// When true, `SKILL.md` skills may run the LLM iteration + shell loop.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub security: SkillsExecSecurity,
+    /// Maximum LLM iterations (each may run one shell command).
+    #[serde(default = "default_skills_exec_max_steps")]
+    pub max_steps: usize,
+    /// Per-command timeout (seconds).
+    #[serde(default = "default_skills_exec_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Prepend `kubectl --context=<name>` for commands starting with `kubectl`.
+    #[serde(default)]
+    pub prepend_kubectl_context: bool,
+    /// When `security = allowlist`, also allow `helm list|get|status|version` style reads.
+    #[serde(default)]
+    pub allow_helm: bool,
+}
+
+fn default_skills_exec_max_steps() -> usize {
+    10
+}
+
+fn default_skills_exec_timeout_secs() -> u64 {
+    120
+}
+
+impl Default for SkillsExecConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            security: SkillsExecSecurity::Allowlist,
+            max_steps: default_skills_exec_max_steps(),
+            timeout_secs: default_skills_exec_timeout_secs(),
+            prepend_kubectl_context: false,
+            allow_helm: false,
+        }
+    }
 }
 
 fn default_skills_dir() -> PathBuf {
@@ -346,19 +469,18 @@ fn default_timeout() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct K8sClusterConfig {
+pub struct ClusterConfig {
     pub enabled: bool,
+    /// When set, used as `kubectl --context`; when absent, the TOML table key (logical name) is used.
     #[serde(default)]
     pub context: Option<String>,
-    pub kubeconfig_path: PathBuf,
-    #[serde(default = "default_namespace")]
-    pub default_namespace: String,
-    #[serde(default = "default_timeout")]
-    pub timeout_secs: u64,
 }
 
-fn default_namespace() -> String {
-    "default".to_string()
+impl ClusterConfig {
+    /// Context string passed to `kubectl --context=...` when `prepend_kubectl_context` is enabled.
+    pub fn kubectl_context_name<'a>(&'a self, logical_name: &'a str) -> &'a str {
+        self.context.as_deref().unwrap_or(logical_name)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -400,9 +522,6 @@ pub struct SecurityConfig {
 
     #[serde(default)]
     pub sensitive_path_suffixes: Vec<String>,
-
-    #[serde(default)]
-    pub allowed_kubeconfig_paths: Vec<PathBuf>,
 
     #[serde(default)]
     pub api_key_vault: Option<String>,
@@ -458,7 +577,7 @@ impl Default for Config {
             skills: SkillsConfig::default(),
             mcp: MCPConfig::default(),
             aiops: HashMap::new(),
-            kubernetes: HashMap::new(),
+            clusters: HashMap::new(),
             observability: ObservabilityConfig::default(),
             security: SecurityConfig::default(),
             logging: LoggingConfig::default(),
@@ -487,6 +606,7 @@ impl Default for SkillsConfig {
             open_skills_dir: None,
             allowed_scripts: false,
             trusted_skill_roots: Vec::new(),
+            exec: SkillsExecConfig::default(),
         }
     }
 }

@@ -4,6 +4,8 @@ use aiclaw_types::skill::{SkillManifest, SkillMetadata, SkillTool};
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
+use super::kubeconfig_hint::expand_path;
+
 /// Skill loader - scans directories and loads skill manifests
 pub struct SkillLoader {
     skills_dir: PathBuf,
@@ -11,8 +13,9 @@ pub struct SkillLoader {
 
 impl SkillLoader {
     pub fn new(skills_dir: impl Into<PathBuf>) -> Self {
+        let raw: PathBuf = skills_dir.into();
         Self {
-            skills_dir: skills_dir.into(),
+            skills_dir: expand_path(raw.to_string_lossy().as_ref()),
         }
     }
 
@@ -54,7 +57,14 @@ impl SkillLoader {
         let md_path = dir.join("SKILL.md");
 
         if md_path.exists() {
-            self.load_from_md(&md_path)
+            let mut meta = self.load_from_md(&md_path)?;
+            if toml_path.exists() {
+                let extra_tools = self.load_skill_tools(dir)?;
+                if !extra_tools.is_empty() {
+                    meta.tools = extra_tools;
+                }
+            }
+            Ok(meta)
         } else if toml_path.exists() {
             self.load_from_toml(&toml_path)
         } else {
@@ -97,6 +107,7 @@ impl SkillLoader {
             raw_content: content,
             applicability,
             domain_tags,
+            tools: Vec::new(),
         })
     }
 

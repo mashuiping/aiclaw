@@ -2,8 +2,9 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
-use super::types::{ChatMessage, ChatOptions, ChatResponse};
+use super::types::{ChatDelta, ChatMessage, ChatOptions, ChatResponse, Usage};
 
 /// LLM Provider trait - implemented by each provider (OpenAI, Anthropic, etc.)
 #[async_trait]
@@ -27,6 +28,21 @@ pub trait LLMProvider: Send + Sync {
             .chat(vec![ChatMessage::user(prompt)], None)
             .await?;
         Ok(response.content)
+    }
+
+    /// Stream a chat response via a channel. The default implementation
+    /// falls back to the non-streaming `chat()` method, so existing providers
+    /// work without changes.
+    async fn stream_chat(
+        &self,
+        messages: Vec<ChatMessage>,
+        options: Option<ChatOptions>,
+        tx: mpsc::UnboundedSender<ChatDelta>,
+    ) -> anyhow::Result<()> {
+        let resp = self.chat(messages, options).await?;
+        let _ = tx.send(ChatDelta::TextDelta(resp.content));
+        let _ = tx.send(ChatDelta::Done { usage: resp.usage });
+        Ok(())
     }
 
     /// Health check
@@ -53,8 +69,9 @@ pub trait LLMRouter: Send + Sync {
 /// Intent classifier trait
 #[async_trait]
 pub trait IntentClassifier: Send + Sync {
-    /// Classify user intent from a message
-    async fn classify(&self, message: &str) -> anyhow::Result<IntentClassification>;
+    /// Classify user intent from a message.
+    /// `Usage` is from the LLM completion when the model was called (including keyword fallback after JSON parse failure).
+    async fn classify(&self, message: &str) -> anyhow::Result<(IntentClassification, Usage)>;
 
     /// Get the underlying provider
     fn provider(&self) -> Arc<dyn LLMProvider>;

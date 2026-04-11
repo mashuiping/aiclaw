@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use std::path::PathBuf;
 
 /// Agent session for tracking conversation context
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +73,9 @@ pub struct SessionContext {
     /// Pending clarification question
     #[serde(default)]
     pub pending_question: Option<String>,
+    /// User-provided kubeconfig path for this session (takes precedence over process `AICLAW_KUBECONFIG`).
+    #[serde(default)]
+    pub kubeconfig_path: Option<PathBuf>,
 }
 
 /// Record of a single interaction
@@ -145,11 +149,23 @@ pub struct IntentEntities {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentResponse {
     pub session_id: String,
+    /// Config table key for the channel that received the message (used to route `SendMessage.recipient`).
+    #[serde(default)]
+    pub channel_name: String,
+    /// Channel-specific delivery target (e.g. WebSocket peer id); passed as `SendMessage.reply_to` when set.
+    #[serde(default)]
+    pub source_channel_id: String,
     pub message: OutgoingMessage,
     pub success: bool,
     pub evidence: Vec<EvidenceRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Wall-clock duration for this agent turn (ms); set in orchestrator for stdio footer / metrics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_duration_ms: Option<u64>,
+    /// Sum of LLM `total_tokens` for this turn (classify + skills + summarize), when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_total_tokens: Option<u32>,
 }
 
 /// Outgoing message content

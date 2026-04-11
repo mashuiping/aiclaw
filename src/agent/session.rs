@@ -215,6 +215,21 @@ impl SessionManager {
         })
     }
 
+    /// Set kubeconfig path for this session (from user message); overrides process `AICLAW_KUBECONFIG` for skill shells.
+    pub fn set_kubeconfig_path(
+        &self,
+        session_id: &str,
+        path: std::path::PathBuf,
+    ) -> Option<Arc<Session>> {
+        self.sessions.get_mut(session_id).map(|mut r| {
+            let arc = r.value_mut();
+            let session = Arc::make_mut(arc);
+            session.context.kubeconfig_path = Some(path);
+            session.last_activity = Utc::now();
+            arc.clone()
+        })
+    }
+
     /// Clean up expired sessions
     pub fn cleanup_expired(&self) -> usize {
         let now = Utc::now();

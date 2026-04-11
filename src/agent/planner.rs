@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::debug;
 
 use crate::llm::traits::LLMProvider;
-use crate::llm::types::{ChatMessage, ChatOptions};
+use crate::llm::types::{ChatMessage, ChatOptions, Usage};
 
 /// Execution plan - defines what queries to run
 #[derive(Debug, Clone)]
@@ -51,7 +51,7 @@ impl Planner {
     }
 
     /// Create an execution plan from user intent
-    pub async fn plan(&self, user_query: &str, intent_type: &str) -> anyhow::Result<ExecutionPlan> {
+    pub async fn plan(&self, user_query: &str, intent_type: &str) -> anyhow::Result<(ExecutionPlan, Usage)> {
         debug!("Creating execution plan for: {}", user_query);
 
         let prompt = format!(
@@ -105,8 +105,9 @@ impl Planner {
             .with_max_tokens(1024);
 
         let response = self.provider.chat(messages, Some(options)).await?;
-
-        self.parse_plan(&response.content).await
+        let usage = response.usage.clone();
+        let plan = self.parse_plan(&response.content).await?;
+        Ok((plan, usage))
     }
 
     async fn parse_plan(&self, response: &str) -> anyhow::Result<ExecutionPlan> {

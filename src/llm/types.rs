@@ -10,6 +10,7 @@ pub enum MessageRole {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 impl MessageRole {
@@ -18,6 +19,7 @@ impl MessageRole {
             MessageRole::System => "system",
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
         }
     }
 }
@@ -29,6 +31,20 @@ pub struct ChatMessage {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Tool calls requested by the assistant (populated from streaming tool call events).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// Tool result content (for role=tool messages).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_call_id: Option<String>,
+}
+
+/// A tool call requested by the assistant.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
 }
 
 impl ChatMessage {
@@ -37,6 +53,8 @@ impl ChatMessage {
             role: MessageRole::System,
             content: content.into(),
             name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 
@@ -45,6 +63,8 @@ impl ChatMessage {
             role: MessageRole::User,
             content: content.into(),
             name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 
@@ -53,6 +73,28 @@ impl ChatMessage {
             role: MessageRole::Assistant,
             content: content.into(),
             name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn assistant_with_tool_calls(content: String, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: MessageRole::Assistant,
+            content,
+            name: None,
+            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            tool_call_id: None,
+        }
+    }
+
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Tool,
+            content: content.into(),
+            name: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
         }
     }
 }
@@ -67,6 +109,16 @@ pub struct ChatOptions {
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub user: Option<String>,
+    /// Tool definitions to send to the LLM (OpenAI / Anthropic tool-use format).
+    pub tools: Option<Vec<ToolSpec>>,
+}
+
+/// A tool definition sent to the LLM for function calling / tool use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
 }
 
 impl ChatOptions {
@@ -95,6 +147,30 @@ pub struct ChatResponse {
     pub raw_response: serde_json::Value,
 }
 
+/// Streaming delta events from an LLM provider.
+#[derive(Debug, Clone)]
+pub enum ChatDelta {
+    /// Incremental text token from the assistant response.
+    TextDelta(String),
+    /// Incremental thinking/reasoning token (for models that support extended thinking).
+    ThinkingDelta(String),
+    /// A tool call has started (the model wants to invoke a tool).
+    ToolCallStart {
+        index: usize,
+        id: String,
+        name: String,
+    },
+    /// Incremental JSON argument chunk for an in-progress tool call.
+    ToolCallDelta {
+        index: usize,
+        json_chunk: String,
+    },
+    /// Stream finished successfully.
+    Done { usage: Usage },
+    /// Stream-level error.
+    Error(String),
+}
+
 /// Token usage information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
@@ -110,5 +186,13 @@ impl Usage {
             completion_tokens: 0,
             total_tokens: 0,
         }
+    }
+
+    pub fn merge_assign(&mut self, other: &Usage) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(other.completion_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
     }
 }

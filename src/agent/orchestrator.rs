@@ -4,7 +4,9 @@ use aiclaw_types::agent::{AgentResponse, Intent, IntentType, MessageRole, Outgoi
 use aiclaw_types::channel::{ChannelMessage, SendMessage};
 use chrono::Utc;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -14,11 +16,16 @@ use super::router::{Router, RouteResult};
 use super::session::SessionManager;
 use crate::aiops::AIOpsProvider;
 use crate::channels::Channel;
+use crate::config::{ClusterConfig, SkillsExecConfig};
 use crate::llm::summarizer::{Summarizer, ToolOutput};
 use crate::llm::traits::LLMProvider;
+use crate::llm::types::Usage;
 use crate::mcp::MCPClientPool;
 use crate::observability::{Observer, ObserverEvent};
-use crate::skills::SkillRegistry;
+use crate::skills::{
+    apply_kubectl_context, skill_executor_for_config, LLMSkillExecutor, SkillExecutor, SkillRegistry,
+};
+use crate::utils::string::utf8_prefix_chars;
 
 /// Agent orchestrator - coordinates all agent components
 pub struct AgentOrchestrator {
@@ -29,11 +36,17 @@ pub struct AgentOrchestrator {
     skill_registry: Arc<SkillRegistry>,
     mcp_pool: Arc<MCPClientPool>,
     _aiops_providers: HashMap<String, Box<dyn AIOpsProvider>>,
-    k8s_clients: HashMap<String, Box<dyn crate::kubernetes::K8sClient>>,
+    clusters: HashMap<String, ClusterConfig>,
     pub channels: HashMap<String, Arc<dyn Channel>>,
     observer: Arc<dyn Observer>,
     summarizer: Option<Arc<Summarizer>>,
     planner: Option<Arc<Planner>>,
+    skill_executor: Arc<SkillExecutor>,
+    llm_skill_executor: Option<Arc<LLMSkillExecutor>>,
+    skills_exec: SkillsExecConfig,
+    /// From `AICLAW_KUBECONFIG` at startup; session `kubeconfig_path` takes precedence when present.
+    kubeconfig: Option<PathBuf>,
+    default_cluster: Option<String>,
 }
 
 impl AgentOrchestrator {
@@ -43,10 +56,13 @@ impl AgentOrchestrator {
         skill_registry: Arc<SkillRegistry>,
         mcp_pool: Arc<MCPClientPool>,
         _aiops_providers: HashMap<String, Box<dyn AIOpsProvider>>,
-        k8s_clients: HashMap<String, Box<dyn crate::kubernetes::K8sClient>>,
+        clusters: HashMap<String, ClusterConfig>,
         channels: HashMap<String, Arc<dyn Channel>>,
         observer: Arc<dyn Observer>,
+        kubeconfig: Option<PathBuf>,
     ) -> Self {
+        let skills_exec = SkillsExecConfig::default();
+        let skill_executor = skill_executor_for_config(&skills_exec, kubeconfig.clone());
         Self {
             name: name.into(),
             session_manager,
@@ -55,11 +71,16 @@ impl AgentOrchestrator {
             skill_registry,
             mcp_pool,
             _aiops_providers,
-            k8s_clients,
+            clusters,
             channels,
             observer,
             summarizer: None,
             planner: None,
+            skill_executor,
+            llm_skill_executor: None,
+            skills_exec,
+            kubeconfig,
+            default_cluster: None,
         }
     }
 
@@ -69,17 +90,31 @@ impl AgentOrchestrator {
         skill_registry: Arc<SkillRegistry>,
         mcp_pool: Arc<MCPClientPool>,
         aiops_providers: HashMap<String, Box<dyn AIOpsProvider>>,
-        k8s_clients: HashMap<String, Box<dyn crate::kubernetes::K8sClient>>,
+        clusters: HashMap<String, ClusterConfig>,
         channels: HashMap<String, Arc<dyn Channel>>,
         observer: Arc<dyn Observer>,
         llm_provider: Option<Arc<dyn LLMProvider>>,
+        skills_exec: SkillsExecConfig,
+        kubeconfig: Option<PathBuf>,
+        default_cluster: Option<String>,
     ) -> Self {
         let summarizer = llm_provider.as_ref().map(|p| Arc::new(Summarizer::new(p.clone())));
         let planner = llm_provider.as_ref().map(|p| Arc::new(Planner::new(p.clone())));
 
-        let intent_parser = match llm_provider {
+        let intent_parser = match llm_provider.clone() {
             Some(provider) => IntentParser::with_llm(provider),
             None => IntentParser::new(),
+        };
+
+        let skill_executor = skill_executor_for_config(&skills_exec, kubeconfig.clone());
+        let llm_skill_executor = match (&llm_provider, skills_exec.enabled) {
+            (Some(provider), true) => Some(Arc::new(LLMSkillExecutor::new(
+                provider.clone(),
+                skill_executor.clone(),
+                skills_exec.max_steps,
+                std::time::Duration::from_secs(skills_exec.timeout_secs.max(1)),
+            ))),
+            _ => None,
         };
 
         Self {
@@ -90,16 +125,54 @@ impl AgentOrchestrator {
             skill_registry,
             mcp_pool,
             _aiops_providers: aiops_providers,
-            k8s_clients,
+            clusters,
             channels,
             observer,
             summarizer,
             planner,
+            skill_executor,
+            llm_skill_executor,
+            skills_exec,
+            kubeconfig,
+            default_cluster,
         }
+    }
+
+    /// Append turn timing / token summary for local stdio (stdout transcript).
+    fn stdio_reply_markdown(resp: &AgentResponse) -> String {
+        let mut body = resp.message.content.clone();
+        if resp.source_channel_id != "stdio" {
+            return body;
+        }
+        body.push_str("\n\n---\n");
+        let mut parts = Vec::new();
+        if let Some(ms) = resp.turn_duration_ms {
+            parts.push(format!("turn {} ms", ms));
+        }
+        if let Some(t) = resp.turn_total_tokens {
+            parts.push(format!("llm_tokens {}", t));
+        }
+        if parts.is_empty() {
+            body.push_str("(no LLM token usage recorded for this turn)");
+        } else {
+            body.push_str(&parts.join(" · "));
+        }
+        body
+    }
+
+    fn effective_kubeconfig_path(&self, session_id: &str) -> Option<PathBuf> {
+        self.session_manager
+            .get(session_id)
+            .and_then(|s| s.context.kubeconfig_path.clone())
+            .or_else(|| self.kubeconfig.clone())
     }
 
     /// Handle an incoming message
     pub async fn handle_message(&self, message: ChannelMessage) -> anyhow::Result<AgentResponse> {
+        let stdio_trace = message.channel_id == "stdio";
+        let turn_start = Instant::now();
+        let mut usage = Usage::zero();
+
         let session = self.session_manager.get_or_create(
             &message.sender.user_id,
             &message.channel_name,
@@ -113,6 +186,17 @@ impl AgentOrchestrator {
             message.content.text.clone(),
         );
 
+        if let Some(p) = crate::skills::kubeconfig_hint::extract_from_user_text(&message.content.text) {
+            self.session_manager
+                .set_kubeconfig_path(&session.id, p.clone());
+            info!(
+                session_id = %session.id,
+                path = %p.display(),
+                "Recorded kubeconfig path from user message"
+            );
+        }
+        let runtime_kube = self.effective_kubeconfig_path(&session.id);
+
         let model_used = if self.summarizer.is_some() {
             "llm-powered"
         } else {
@@ -124,22 +208,26 @@ impl AgentOrchestrator {
             model: model_used.to_string(),
         });
 
+        if stdio_trace {
+            eprintln!("(aiclaw) state=intent · one line per message; reply will appear below as [aiclaw]");
+        }
+
         info!(
             "Handling message from {} on channel {}: {}",
             message.sender.user_id,
             message.channel_name,
-            &message.content.text[..message.content.text.len().min(100)]
+            utf8_prefix_chars(&message.content.text, 100)
         );
 
         // Check for follow-up questions or clarification requests
         let is_followup = self.is_followup_question(&message.content.text);
 
-        let mut intent = if is_followup && self.summarizer.is_some() {
-            // For follow-up questions, use LLM to interpret in context
+        let (mut intent, parse_usage) = if is_followup && self.summarizer.is_some() {
             self.parse_followup_intent(&message.content.text, &session).await
         } else {
             self.intent_parser.parse(&message.content.text).await
         };
+        usage.merge_assign(&parse_usage);
 
         // Inherit cluster/namespace from session context if not specified in message
         if intent.entities.cluster.is_none() {
@@ -154,16 +242,26 @@ impl AgentOrchestrator {
         let routes = self.router.route(&intent);
         debug!("Routed to: {:?}", routes);
 
+        if stdio_trace {
+            eprintln!(
+                "(aiclaw) state=routes · intent={:?} route_count={}",
+                intent.intent_type,
+                routes.len()
+            );
+        }
+
         // For Debug intent with planner available, use planner-based execution
         let response = if intent.intent_type == IntentType::Debug && self.planner.is_some() {
-            self.execute_with_planner(&message, &intent).await
+            self.execute_with_planner(&message, &intent, runtime_kube.clone(), &mut usage)
+                .await
         } else if routes.is_empty() {
             self.handle_unknown_intent(&message, &intent).await
         } else if self.is_multi_cluster_query(&intent) {
-            // Execute across multiple clusters
-            self.execute_multi_cluster(&message, &intent, &routes).await
+            self.execute_multi_cluster(&message, &intent, &routes, runtime_kube.clone(), &mut usage)
+                .await
         } else {
-            self.execute_routes(&message, &intent, &routes).await
+            self.execute_routes(&message, &intent, &routes, runtime_kube.clone(), &mut usage)
+                .await
         };
 
         // Add interaction to history
@@ -193,15 +291,32 @@ impl AgentOrchestrator {
             }
         }
 
+        let elapsed = turn_start.elapsed();
+        let token_total = u64::from(usage.total_tokens);
         self.observer.record_event(ObserverEvent::AgentEnd {
             provider: "internal".to_string(),
             model: model_used.to_string(),
-            duration: Default::default(),
-            tokens_used: None,
+            duration: elapsed,
+            tokens_used: (token_total > 0).then_some(token_total),
             cost_usd: None,
         });
 
-        response
+        if stdio_trace {
+            eprintln!(
+                "(aiclaw) state=ready · elapsed={:?} llm_total_tokens={}",
+                elapsed, usage.total_tokens
+            );
+        }
+
+        let turn_duration_ms = elapsed.as_millis() as u64;
+        let turn_total_tokens = (usage.total_tokens > 0).then_some(usage.total_tokens);
+
+        response.map(|mut r| {
+            r.session_id = session.id.clone();
+            r.turn_duration_ms = Some(turn_duration_ms);
+            r.turn_total_tokens = turn_total_tokens;
+            r
+        })
     }
 
     /// Check if message is a follow-up question
@@ -231,9 +346,11 @@ impl AgentOrchestrator {
     }
 
     /// Parse follow-up intent using conversation context
-    async fn parse_followup_intent(&self, message: &str, session: &aiclaw_types::agent::Session) -> Intent {
-        
-
+    async fn parse_followup_intent(
+        &self,
+        message: &str,
+        session: &aiclaw_types::agent::Session,
+    ) -> (Intent, Usage) {
         // Build context from conversation history
         let history_context = session
             .context
@@ -259,7 +376,7 @@ impl AgentOrchestrator {
 
         // For now, fall back to regular parsing
         // A full implementation would call LLM to interpret the follow-up in context
-        let mut intent = self.intent_parser.parse(message).await;
+        let (mut intent, usage) = self.intent_parser.parse(message).await;
 
         // Update entities with session context if not specified in current message
         if intent.entities.cluster.is_none() {
@@ -269,7 +386,7 @@ impl AgentOrchestrator {
             intent.entities.namespace = session.context.current_namespace.clone();
         }
 
-        intent
+        (intent, usage)
     }
 
     /// Handle unknown intent
@@ -284,7 +401,9 @@ impl AgentOrchestrator {
         );
 
         let response = AgentResponse {
-            session_id: message.channel_id.clone(),
+            session_id: String::new(),
+            channel_name: message.channel_name.clone(),
+            source_channel_id: message.channel_id.clone(),
             message: OutgoingMessage {
                 content: response_text,
                 format: OutputFormat::Markdown,
@@ -294,6 +413,8 @@ impl AgentOrchestrator {
             success: false,
             evidence: vec![],
             error: Some("Unknown intent".to_string()),
+            turn_duration_ms: None,
+            turn_total_tokens: None,
         };
 
         Ok(response)
@@ -305,6 +426,8 @@ impl AgentOrchestrator {
         message: &ChannelMessage,
         intent: &Intent,
         routes: &[RouteResult],
+        kubeconfig: Option<PathBuf>,
+        usage: &mut Usage,
     ) -> anyhow::Result<AgentResponse> {
         let mut all_evidence = Vec::new();
         let mut tool_outputs: Vec<ToolOutput> = Vec::new();
@@ -313,7 +436,10 @@ impl AgentOrchestrator {
 
         for route in routes {
             if let Some(ref skill_name) = route.skill_name {
-                match self.execute_skill(skill_name, message, intent).await {
+                match self
+                    .execute_skill(skill_name, message, intent, kubeconfig.clone(), usage)
+                    .await
+                {
                     Ok((text, evidence, tool_results)) => {
                         raw_response_text = text;
                         all_evidence.extend(evidence);
@@ -355,8 +481,9 @@ impl AgentOrchestrator {
                     .summarize(&intent.intent_type, &tool_outputs, &intent.raw_query)
                     .await
                 {
-                    Ok(summary) => {
+                    Ok((summary, u)) => {
                         debug!("LLM summary generated successfully");
+                        usage.merge_assign(&u);
                         summary
                     }
                     Err(e) => {
@@ -373,7 +500,9 @@ impl AgentOrchestrator {
         };
 
         Ok(AgentResponse {
-            session_id: message.channel_id.clone(),
+            session_id: String::new(),
+            channel_name: message.channel_name.clone(),
+            source_channel_id: message.channel_id.clone(),
             message: OutgoingMessage {
                 content: response_text,
                 format: OutputFormat::Markdown,
@@ -383,6 +512,8 @@ impl AgentOrchestrator {
             success,
             evidence: all_evidence,
             error: if success { None } else { Some("Execution failed".to_string()) },
+            turn_duration_ms: None,
+            turn_total_tokens: None,
         })
     }
 
@@ -392,6 +523,8 @@ impl AgentOrchestrator {
         skill_name: &str,
         message: &ChannelMessage,
         intent: &Intent,
+        kubeconfig: Option<PathBuf>,
+        usage: &mut Usage,
     ) -> anyhow::Result<(
         String,
         Vec<aiclaw_types::agent::EvidenceRecord>,
@@ -422,37 +555,88 @@ impl AgentOrchestrator {
             user_id: message.sender.user_id.clone(),
             channel: message.channel_name.clone(),
             thread_id: message.thread_id.clone(),
-            parameters: params,
+            parameters: params.clone(),
             session_id: Some(message.channel_id.clone()),
         };
 
-        let results = self.execute_skill_tools(&skill, &context).await?;
+        let kubectl_ctx = self.kubectl_context_for_intent(intent);
 
         let mut output = String::new();
         let mut evidence = Vec::new();
         let mut tool_results: Vec<(String, String, bool)> = Vec::new();
 
-        for result in results {
-            let tool_name = result.tool_name.clone();
-            let tool_output = if result.success {
-                result.output.clone().unwrap_or_default()
-            } else {
-                result.error.clone().unwrap_or_default()
-            };
+        if !skill.tools.is_empty() {
+            let results = self
+                .execute_skill_tools(
+                    skill.as_ref(),
+                    &context,
+                    kubectl_ctx.clone(),
+                    kubeconfig.as_deref(),
+                )
+                .await?;
 
-            output += &format!("[{}]\n{}\n\n", tool_name, tool_output);
-            tool_results.push((tool_name.clone(), tool_output, result.success));
+            for result in results {
+                let tool_name = result.tool_name.clone();
+                let tool_output = if result.success {
+                    result.output.clone().unwrap_or_default()
+                } else {
+                    result.error.clone().unwrap_or_default()
+                };
 
-            evidence.push(aiclaw_types::agent::EvidenceRecord {
-                timestamp: Utc::now(),
-                source: "skill".to_string(),
-                action: result.tool_name,
-                data: serde_json::json!({
-                    "success": result.success,
-                    "output": result.output,
-                    "error": result.error,
-                }),
-            });
+                output += &format!("[{}]\n{}\n\n", tool_name, tool_output);
+                tool_results.push((tool_name.clone(), tool_output, result.success));
+
+                evidence.push(aiclaw_types::agent::EvidenceRecord {
+                    timestamp: Utc::now(),
+                    source: "skill".to_string(),
+                    action: result.tool_name,
+                    data: serde_json::json!({
+                        "success": result.success,
+                        "output": result.output,
+                        "error": result.error,
+                    }),
+                });
+            }
+        } else if self.skills_exec.enabled && !skill.raw_content.is_empty() {
+            match &self.llm_skill_executor {
+                Some(lse) => {
+                    let res = lse
+                        .execute_skill(
+                            &skill.raw_content,
+                            &message.content.text,
+                            &params,
+                            kubectl_ctx.as_deref(),
+                            kubeconfig.as_deref(),
+                        )
+                        .await?;
+
+                    usage.merge_assign(&res.llm_usage);
+                    output = res.output.clone();
+                    for (i, rec) in res.execution_history.iter().enumerate() {
+                        let label = format!("shell_step_{}", i + 1);
+                        let body = format!("```text\n{}\n```\n\n{}", rec.command, rec.output);
+                        tool_results.push((label.clone(), body, rec.success));
+                        evidence.push(aiclaw_types::agent::EvidenceRecord {
+                            timestamp: Utc::now(),
+                            source: "skill".to_string(),
+                            action: label,
+                            data: serde_json::json!({
+                                "success": rec.success,
+                                "command": rec.command,
+                                "output": rec.output,
+                            }),
+                        });
+                    }
+                }
+                None => {
+                    warn!("skills.exec.enabled but no LLM provider; cannot run LLM skill loop");
+                    output = "已启用 `skills.exec.enabled`，但未配置可用的 LLM provider（请使用 `AgentOrchestrator::with_llm` 并提供模型）。".to_string();
+                }
+            }
+        } else if !skill.raw_content.is_empty() && !self.skills_exec.enabled {
+            output = "该技能包含诊断文档，但未启用自动执行。请在配置中设置 `[skills].exec.enabled = true`（并配置 LLM 与命令安全策略）。".to_string();
+        } else {
+            output = "该技能未声明可执行工具（`SKILL.toml` 的 `[[tools]]`），且无可用文档内容。".to_string();
         }
 
         self.observer.record_event(ObserverEvent::SkillExecutionEnd {
@@ -464,22 +648,45 @@ impl AgentOrchestrator {
         Ok((output, evidence, tool_results))
     }
 
+    fn kubectl_context_for_intent(&self, intent: &Intent) -> Option<String> {
+        if !self.skills_exec.prepend_kubectl_context {
+            return None;
+        }
+        let cluster = intent
+            .entities
+            .cluster
+            .as_deref()
+            .or(self.default_cluster.as_deref())?;
+        let cfg = self.clusters.get(cluster)?;
+        if !cfg.enabled {
+            return None;
+        }
+        Some(cfg.kubectl_context_name(cluster).to_string())
+    }
+
+    fn interpolate_skill_placeholders(template: &str, args: &HashMap<String, String>) -> String {
+        let mut result = template.to_string();
+        for (key, value) in args {
+            let placeholder = format!("{{{{{}}}}}", key);
+            result = result.replace(&placeholder, value);
+        }
+        result
+    }
+
     /// Execute skill tools
     async fn execute_skill_tools(
         &self,
         skill: &aiclaw_types::skill::SkillMetadata,
         context: &aiclaw_types::skill::SkillContext,
+        kubectl_ctx: Option<String>,
+        kubeconfig: Option<&std::path::Path>,
     ) -> anyhow::Result<Vec<aiclaw_types::skill::ToolResult>> {
-        use crate::skills::SkillExecutor;
-
-        let executor = SkillExecutor::new();
         let mut results = Vec::new();
 
-        let tools = self.skill_registry.get_tools(skill.name.as_str())
-            .unwrap_or_default();
-
-        for tool in tools {
-            let args: HashMap<String, String> = tool.args.iter()
+        for tool in skill.tools.iter() {
+            let mut args: HashMap<String, String> = tool
+                .args
+                .iter()
                 .map(|(k, v)| {
                     let mut interpolated = v.clone();
                     for (pk, pv) in &context.parameters {
@@ -489,7 +696,23 @@ impl AgentOrchestrator {
                 })
                 .collect();
 
-            match executor.execute_tool(&tool, &args).await {
+            for (pk, pv) in &context.parameters {
+                args.entry(pk.clone()).or_insert_with(|| pv.clone());
+            }
+
+            let mut tool_run = tool.clone();
+            if tool_run.kind == aiclaw_types::skill::ToolKind::Shell {
+                let expanded =
+                    Self::interpolate_skill_placeholders(&tool_run.command, &args);
+                tool_run.command =
+                    apply_kubectl_context(&expanded, kubectl_ctx.as_deref());
+            }
+
+            match self
+                .skill_executor
+                .execute_tool(&tool_run, &args, kubeconfig)
+                .await
+            {
                 Ok(result) => results.push(result),
                 Err(e) => {
                     results.push(aiclaw_types::skill::ToolResult {
@@ -575,6 +798,8 @@ impl AgentOrchestrator {
         &self,
         message: &ChannelMessage,
         intent: &Intent,
+        kubeconfig: Option<PathBuf>,
+        usage: &mut Usage,
     ) -> anyhow::Result<AgentResponse> {
         let Some(ref planner) = self.planner else {
             anyhow::bail!("Planner not available");
@@ -587,11 +812,16 @@ impl AgentOrchestrator {
             .plan(&intent.raw_query, &format!("{:?}", intent.intent_type))
             .await
         {
-            Ok(p) => p,
+            Ok((p, u)) => {
+                usage.merge_assign(&u);
+                p
+            }
             Err(e) => {
                 warn!("Planner failed, falling back to route-based execution: {}", e);
                 let routes = self.router.route(intent);
-                return self.execute_routes(message, intent, &routes).await;
+                return self
+                    .execute_routes(message, intent, &routes, kubeconfig.clone(), usage)
+                    .await;
             }
         };
 
@@ -656,7 +886,10 @@ impl AgentOrchestrator {
             );
 
             match summarizer.summarize_text(&reasoning_prompt, "诊断结论和解决方案").await {
-                Ok(summary) => summary,
+                Ok((summary, u)) => {
+                    usage.merge_assign(&u);
+                    summary
+                }
                 Err(e) => {
                     warn!("LLM reasoning failed: {}", e);
                     format!(
@@ -684,7 +917,9 @@ impl AgentOrchestrator {
         };
 
         Ok(AgentResponse {
-            session_id: message.channel_id.clone(),
+            session_id: String::new(),
+            channel_name: message.channel_name.clone(),
+            source_channel_id: message.channel_id.clone(),
             message: OutgoingMessage {
                 content: response_text,
                 format: OutputFormat::Markdown,
@@ -694,6 +929,8 @@ impl AgentOrchestrator {
             success,
             evidence: all_evidence,
             error: if success { None } else { Some("Some steps failed".to_string()) },
+            turn_duration_ms: None,
+            turn_total_tokens: None,
         })
     }
 
@@ -705,7 +942,7 @@ impl AgentOrchestrator {
     ) -> anyhow::Result<(ToolOutput, Vec<aiclaw_types::agent::EvidenceRecord>)> {
         // For now, we execute via skills/MCP based on query type
         // This is a simplified implementation - a full implementation would
-        // directly call K8s clients or metrics APIs
+        // call metrics APIs or shell-backed cluster queries (e.g. `[skills].exec`).
 
         let (tool_name, query_result) = match step.query_type {
             QueryType::PodLogs => {
@@ -761,11 +998,21 @@ impl AgentOrchestrator {
         info!("Agent orchestrator {} started", self.name);
 
         while let Some(message) = rx.recv().await {
+            if message.channel_id == "stdio" {
+                eprintln!("(aiclaw) state=queued · processing your line…");
+            }
             match self.handle_message(message).await {
                 Ok(response) => {
-                    let send_msg = SendMessage::markdown(
-                        &response.session_id,
-                        &response.message.content,
+                    let reply_to = if response.source_channel_id.is_empty() {
+                        None
+                    } else {
+                        Some(response.source_channel_id.clone())
+                    };
+                    let body = Self::stdio_reply_markdown(&response);
+                    let send_msg = SendMessage::markdown_to_channel(
+                        &response.channel_name,
+                        reply_to,
+                        body,
                     );
 
                     if let Err(e) = self.send_response(&send_msg).await {
@@ -813,7 +1060,11 @@ impl AgentOrchestrator {
 
     /// Get list of known clusters
     fn get_known_clusters(&self) -> Vec<String> {
-        self.k8s_clients.keys().cloned().collect()
+        self.clusters
+            .iter()
+            .filter(|(_, c)| c.enabled)
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     /// Execute query across multiple clusters
@@ -822,11 +1073,15 @@ impl AgentOrchestrator {
         message: &ChannelMessage,
         intent: &Intent,
         routes: &[RouteResult],
+        kubeconfig: Option<PathBuf>,
+        usage: &mut Usage,
     ) -> anyhow::Result<AgentResponse> {
         let clusters = self.get_known_clusters();
 
         if clusters.is_empty() {
-            return self.execute_routes(message, intent, routes).await;
+            return self
+                .execute_routes(message, intent, routes, kubeconfig.clone(), usage)
+                .await;
         }
 
         info!("Executing multi-cluster query across {} clusters: {:?}", clusters.len(), clusters);
@@ -849,7 +1104,10 @@ impl AgentOrchestrator {
                 raw_query: intent.raw_query.clone(),
             };
 
-            match self.execute_routes(message, &intent_for_cluster, routes).await {
+            match self
+                .execute_routes(message, &intent_for_cluster, routes, kubeconfig.clone(), usage)
+                .await
+            {
                 Ok(resp) => {
                     if !resp.message.content.is_empty() {
                         all_tool_outputs.push(ToolOutput::new(
@@ -874,7 +1132,10 @@ impl AgentOrchestrator {
         let response_text = if !all_tool_outputs.is_empty() {
             if let Some(ref summarizer) = self.summarizer {
                 match summarizer.summarize(&intent.intent_type, &all_tool_outputs, &intent.raw_query).await {
-                    Ok(summary) => summary,
+                    Ok((summary, u)) => {
+                        usage.merge_assign(&u);
+                        summary
+                    }
                     Err(e) => {
                         warn!("Multi-cluster summarization failed: {}", e);
                         self.format_multi_cluster_output(&all_tool_outputs, &clusters)
@@ -890,7 +1151,9 @@ impl AgentOrchestrator {
         };
 
         Ok(AgentResponse {
-            session_id: message.channel_id.clone(),
+            session_id: String::new(),
+            channel_name: message.channel_name.clone(),
+            source_channel_id: message.channel_id.clone(),
             message: OutgoingMessage {
                 content: response_text,
                 format: OutputFormat::Markdown,
@@ -900,6 +1163,8 @@ impl AgentOrchestrator {
             success,
             evidence: all_evidence,
             error: if success { None } else { Some("Multi-cluster query partially failed".to_string()) },
+            turn_duration_ms: None,
+            turn_total_tokens: None,
         })
     }
 

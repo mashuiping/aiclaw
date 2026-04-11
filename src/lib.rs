@@ -1,7 +1,7 @@
 //! AIClaw - AI Ops Agent
 //!
 //! A Rust-based AI operations agent that connects to messaging platforms,
-//! loads skills, queries observability data, and troubleshoots Kubernetes clusters.
+//! loads skills, queries observability data, and runs diagnostics via skills (including host `kubectl`).
 
 #![allow(ambiguous_glob_reexports)]
 
@@ -10,10 +10,10 @@ pub mod aiops;
 pub mod channels;
 pub mod config;
 pub mod feedback;
-pub mod kubernetes;
 pub mod llm;
 pub mod mcp;
 pub mod observability;
+pub mod repl;
 
 pub mod security;
 pub mod skills;
@@ -24,7 +24,6 @@ pub use aiops::*;
 pub use channels::*;
 pub use config::*;
 pub use feedback::*;
-pub use kubernetes::*;
 pub use llm::*;
 pub use mcp::*;
 pub use observability::*;

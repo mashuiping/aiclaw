@@ -9,7 +9,7 @@ use crate::llm::traits::{
     IntentClassification, IntentClassifier, IntentEntities, IntentParseResult,
     INTENT_CLASSIFICATION_PROMPT,
 };
-use crate::llm::types::{ChatMessage, ChatOptions};
+use crate::llm::types::{ChatMessage, ChatOptions, Usage};
 use crate::llm::LLMProvider;
 
 /// LLM-based intent classifier implementation
@@ -164,7 +164,7 @@ impl IntentClassifierImpl {
 
 #[async_trait]
 impl IntentClassifier for IntentClassifierImpl {
-    async fn classify(&self, message: &str) -> anyhow::Result<IntentClassification> {
+    async fn classify(&self, message: &str) -> anyhow::Result<(IntentClassification, Usage)> {
         debug!("Classifying intent for: {}", message);
 
         let messages = vec![
@@ -177,6 +177,7 @@ impl IntentClassifier for IntentClassifierImpl {
             .with_max_tokens(512);
 
         let response = self.provider.chat(messages, Some(options)).await?;
+        let usage = response.usage.clone();
 
         debug!("LLM response: {}", response.content);
 
@@ -188,7 +189,7 @@ impl IntentClassifier for IntentClassifierImpl {
                         "Parsed intent: {} (confidence: {})",
                         result.intent, result.confidence
                     );
-                    return Ok(result.into());
+                    return Ok((result.into(), usage));
                 }
                 Err(e) => {
                     warn!("Failed to parse intent JSON: {}", e);
@@ -199,7 +200,7 @@ impl IntentClassifier for IntentClassifierImpl {
         // Fallback to rule-based if parsing fails
         if self.fallback_enabled {
             warn!("Using fallback classification");
-            Ok(Self::fallback_classify(message))
+            Ok((Self::fallback_classify(message), usage))
         } else {
             anyhow::bail!("Failed to parse LLM response as JSON and fallback is disabled")
         }

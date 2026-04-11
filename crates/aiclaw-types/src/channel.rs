@@ -156,4 +156,25 @@ impl SendMessage {
             reply_to: None,
         }
     }
+
+    /// Markdown reply routed to `recipient` (channel config key), with optional per-peer `reply_to`.
+    pub fn markdown_to_channel(
+        recipient: impl Into<String>,
+        reply_to: Option<String>,
+        markdown: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: Some(Uuid::new_v4().to_string()),
+            recipient: recipient.into(),
+            content: OutgoingContent::Formatted(FormattedMessage {
+                body: markdown.into(),
+                format: MessageFormat::Markdown,
+                code_block: None,
+                table: None,
+                actions: None,
+            }),
+            thread_id: None,
+            reply_to,
+        }
+    }
 }

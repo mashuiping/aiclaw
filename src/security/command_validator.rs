@@ -22,6 +22,8 @@ pub enum RiskLevel {
 
 /// Command whitelist validator
 pub struct CommandValidator {
+    /// When set, reject every shell command (policy kill-switch).
+    deny_all: bool,
     /// Allowed command patterns (e.g., "kubectl get", "kubectl logs")
     allowed_patterns: Vec<CommandPattern>,
     /// Commands that require explicit confirmation
@@ -47,6 +49,18 @@ struct CommandPattern {
 impl CommandValidator {
     pub fn new() -> Self {
         Self {
+            deny_all: false,
+            allowed_patterns: Vec::new(),
+            confirmation_required: Vec::new(),
+            sensitive_keywords: HashSet::new(),
+            blocked_commands: HashSet::new(),
+        }
+    }
+
+    /// Reject all commands (used for `skills.exec.security = "deny"`).
+    pub fn deny_all() -> Self {
+        Self {
+            deny_all: true,
             allowed_patterns: Vec::new(),
             confirmation_required: Vec::new(),
             sensitive_keywords: HashSet::new(),
@@ -69,6 +83,41 @@ impl CommandValidator {
         self
     }
 
+    /// Allow read-only `helm` subcommands (HAMi / release discovery).
+    pub fn add_helm_read_pattern(mut self) -> Self {
+        self.allowed_patterns.push(CommandPattern {
+            base: "helm".to_string(),
+            allowed_subcommands: vec![
+                "list".to_string(),
+                "get".to_string(),
+                "status".to_string(),
+                "version".to_string(),
+                "show".to_string(),
+                "history".to_string(),
+            ],
+            allowed_resources: vec![],
+        });
+        self
+    }
+
+    /// Development-only: no program allowlist, still blocks obvious shell hazards.
+    pub fn permissive_shell() -> Self {
+        Self::new()
+            .add_blocked_commands(vec![
+                "rm".to_string(),
+                "dd".to_string(),
+                "mkfs".to_string(),
+                ">:".to_string(),
+                "|".to_string(),
+                "&".to_string(),
+                ";".to_string(),
+                "eval".to_string(),
+                "ssh".to_string(),
+                "curl".to_string(),
+                "wget".to_string(),
+            ])
+    }
+
     /// Add a command that requires confirmation
     pub fn add_confirmation_required(mut self, pattern: String) -> Self {
         self.confirmation_required.push(pattern);
@@ -85,6 +134,15 @@ impl CommandValidator {
 
     /// Validate a command string
     pub fn validate(&self, command: &str) -> ValidationResult {
+        if self.deny_all {
+            return ValidationResult {
+                allowed: false,
+                reason: Some("Command execution denied by policy (deny-all)".to_string()),
+                requires_confirmation: false,
+                risk_level: RiskLevel::Critical,
+            };
+        }
+
         let parts: Vec<&str> = command.split_whitespace().collect();
 
         if parts.is_empty() {

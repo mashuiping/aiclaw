@@ -139,9 +139,9 @@ impl SkillRegistry {
             .collect()
     }
 
-    /// Get tools for a skill (placeholder - actual implementation would load from files)
-    pub fn get_tools(&self, _skill_name: &str) -> Option<Vec<SkillTool>> {
-        None
+    /// Declarative tools from `SKILL.toml` (or merged when loaded with `SKILL.md`).
+    pub fn get_tools(&self, skill_name: &str) -> Option<Vec<SkillTool>> {
+        self.get(skill_name).map(|s| s.tools.clone())
     }
 
     /// Get the count of registered skills
@@ -152,6 +152,13 @@ impl SkillRegistry {
     /// Check if registry is empty
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
+    }
+
+    /// List all skill names (sorted).
+    pub fn list_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.skills.iter().map(|r| r.key().clone()).collect();
+        names.sort();
+        names
     }
 }
 

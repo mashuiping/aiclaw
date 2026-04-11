@@ -1,12 +1,16 @@
 # AIClaw Configuration Example
 #
 # Copy this file to ~/.aiclaw/config.toml and customize it.
+#
+# Cluster access for `[skills].exec`: set environment variable AICLAW_KUBECONFIG to an absolute
+# path to a kubeconfig file when starting the binary (not configured in this file).
 
 [agent]
 name = "aiclaw"
 session_timeout_secs = 3600
 concurrent_limit = 100
-default_cluster = "prod"
+# Optional logical cluster key (must match a `[clusters.<name>]` key) when using `[skills].exec.prepend_kubectl_context` and the message does not name a cluster.
+# default_cluster = "prod"
 compact_prompt = false
 
 # Feishu (飞书) Configuration
@@ -29,11 +33,40 @@ corp_id = "wwxxxxxxxxxxxxxx"
 agent_id = "1000001"
 # webhook_url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
+# Local channel: stdin/stdout (mode = "stdio") or WebSocket gateway (mode = "http") on bind:port.
+# Use one mode per process; stdio reads one line per user message; assistant replies are prefixed with [aiclaw].
+[channels.local]
+type = "Local"
+enabled = false
+mode = "stdio" # stdio | http
+bind = "127.0.0.1"
+port = 18789
+
 # Skills Configuration
 [skills]
 skills_dir = "~/.aiclaw/skills"
 open_skills_enabled = false
 allowed_scripts = false
+
+# LLM + shell loop for Markdown skills (OpenClaw-style `tools.exec` subset).
+# When enabled, requires a working [llm] default provider and safe network/RBAC on the host running aiclaw.
+[skills.exec]
+enabled = false
+security = "allowlist" # deny | allowlist | full
+max_steps = 10
+timeout_secs = 120
+prepend_kubectl_context = false
+allow_helm = false
+
+# Logical cluster registry: maps intent / default_cluster names to kubectl --context (host kubectl only).
+# If `context` is omitted, the TOML table key (e.g. prod) is used as the kubectl context name.
+# Legacy top-level table name `[kubernetes.<name>]` is still accepted as an alias for `[clusters.<name>]`.
+[clusters.prod]
+enabled = true
+# context = "my-eks-prod"
+
+[clusters.dev]
+enabled = false
 
 # MCP Server Configuration (VictoriaMetrics, etc.)
 [mcp.servers.victoriametrics]
@@ -58,21 +91,6 @@ provider_type = "prometheus"
 endpoint = "http://prometheus:9090"
 timeout_secs = 30
 retry_attempts = 3
-
-# Kubernetes Clusters
-[kubernetes.prod]
-enabled = true
-context = "prod"
-kubeconfig_path = "~/.kube/config"
-default_namespace = "default"
-timeout_secs = 10
-
-[kubernetes.dev]
-enabled = false
-context = "dev"
-kubeconfig_path = "~/.kube/config-dev"
-default_namespace = "dev"
-timeout_secs = 10
 
 # Observability
 [observability]
@@ -125,6 +143,7 @@ timeout_secs = 120
 enabled = true
 provider_type = "anthropic"
 api_key = "${ANTHROPIC_API_KEY}"
+# base_url = "https://api.anthropic.com"  # Optional: defaults to Anthropic API
 model = "claude-3-5-sonnet-20241022"
 max_tokens = 1024
 timeout_secs = 60
@@ -134,6 +153,7 @@ timeout_secs = 60
 enabled = false
 provider_type = "openai"
 api_key = "${OPENAI_API_KEY}"
+# base_url = "https://api.openai.com/v1"  # Optional: defaults to OpenAI API
 model = "gpt-4o"
 max_tokens = 1024
 timeout_secs = 60

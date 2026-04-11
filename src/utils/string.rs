@@ -2,15 +2,23 @@
 
 use regex::Regex;
 
-/// Truncate string to max length with ellipsis
-pub fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else if max_len < 3 {
-        s[..max_len].to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
+/// Prefix of `s` with at most `max_chars` Unicode scalar values (always on UTF-8 boundaries).
+pub fn utf8_prefix_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        None => s,
+        Some((idx, _)) => &s[..idx],
     }
+}
+
+/// Truncate string to at most `max_chars` characters, appending `...` when shortened.
+pub fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    if max_chars < 3 {
+        return utf8_prefix_chars(s, max_chars).to_string();
+    }
+    format!("{}...", utf8_prefix_chars(s, max_chars - 3))
 }
 
 /// Extract mentions from text
@@ -41,6 +49,13 @@ mod tests {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 8), "hello...");
         assert_eq!(truncate("hi", 2), "hi");
+    }
+
+    #[test]
+    fn utf8_prefix_does_not_panic_on_multibyte() {
+        let s = "为什么 pending";
+        assert_eq!(utf8_prefix_chars(s, 3), "为什么");
+        assert_eq!(utf8_prefix_chars(s, 100), s);
     }
 
     #[test]

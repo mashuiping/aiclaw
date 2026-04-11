@@ -5,14 +5,30 @@
 //! read the full SKILL.md markdown and execute commands iteratively.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::llm::traits::LLMProvider;
+use crate::llm::types::Usage;
 use crate::skills::SkillExecutor;
+use crate::utils::string::utf8_prefix_chars;
 
-/// Maximum iterations per skill execution
-const MAX_EXECUTION_STEPS: usize = 10;
+/// If `command` starts with `kubectl`, inject `--context` after the binary name.
+pub fn apply_kubectl_context(command: &str, context: Option<&str>) -> String {
+    let Some(ctx) = context.filter(|c| !c.is_empty()) else {
+        return command.to_string();
+    };
+    let trimmed = command.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("kubectl ") {
+        return format!("kubectl --context={ctx} {rest}");
+    }
+    if trimmed == "kubectl" {
+        return format!("kubectl --context={ctx}");
+    }
+    command.to_string()
+}
 
 /// Prompt for LLM to decide next action given skill and context
 const SKILL_EXECUTION_PROMPT: &str = r#"你是运维诊断专家。请根据以下 Skill 的内容，帮助用户诊断问题。
@@ -45,7 +61,8 @@ const SKILL_EXECUTION_PROMPT: &str = r#"你是运维诊断专家。请根据以�
 重要：
 - 命令必须从 Skill 中提供的命令中选择，或根据实际情况构造合理的 kubectl 命令
 - 如果 Skill 包含条件判断，根据命令结果判断条件是否满足
-- 最多执行 {{max_steps}} 步，如果仍未诊断清楚，给出当前最佳判断"#;
+- 最多执行 {{max_steps}} 步，如果仍未诊断清楚，给出当前最佳判断
+- 若多次 kubectl/helm 失败且疑似缺少集群凭证，**不要继续循环执行同类命令**；请用户通过 **`AICLAW_KUBECONFIG=<绝对路径>`** 启动本程序。用户若已在「用户问题」中写明 kubeconfig 路径，**不要再次询问路径**。"#;
 
 /// Result of skill execution
 #[derive(Debug)]
@@ -60,6 +77,8 @@ pub struct SkillExecutionResult {
     pub execution_history: Vec<CommandRecord>,
     /// Final output to show user
     pub output: String,
+    /// Cumulative LLM token usage for the skill loop (each `chat` call).
+    pub llm_usage: Usage,
 }
 
 /// Record of a single command execution
@@ -72,12 +91,25 @@ pub struct CommandRecord {
 
 /// LLM-driven skill executor
 pub struct LLMSkillExecutor {
+    provider: Arc<dyn LLMProvider>,
     skill_executor: Arc<SkillExecutor>,
+    max_steps: usize,
+    shell_timeout: Duration,
 }
 
 impl LLMSkillExecutor {
-    pub fn new(skill_executor: Arc<SkillExecutor>) -> Self {
-        Self { skill_executor }
+    pub fn new(
+        provider: Arc<dyn LLMProvider>,
+        skill_executor: Arc<SkillExecutor>,
+        max_steps: usize,
+        shell_timeout: Duration,
+    ) -> Self {
+        Self {
+            provider,
+            skill_executor,
+            max_steps: max_steps.max(1),
+            shell_timeout,
+        }
     }
 
     /// Execute a skill using LLM-driven approach
@@ -86,11 +118,14 @@ impl LLMSkillExecutor {
         skill_content: &str,
         user_query: &str,
         params: &HashMap<String, String>,
+        kubectl_context: Option<&str>,
+        kubeconfig: Option<&Path>,
     ) -> anyhow::Result<SkillExecutionResult> {
         info!("Starting LLM-driven skill execution for query: {}", user_query);
 
         let mut execution_history: Vec<CommandRecord> = Vec::new();
         let mut current_status = "等待开始诊断".to_string();
+        let mut llm_usage = Usage::zero();
 
         // Prompt is rebuilt each iteration so the LLM sees execution history and status.
         let mut prompt = Self::build_prompt(
@@ -98,18 +133,20 @@ impl LLMSkillExecutor {
             user_query,
             &execution_history,
             &current_status,
+            self.max_steps,
         );
 
-        // Get LLM provider from somewhere - this should be injected
-        // For now, we'll use a placeholder that gets resolved later
-        let provider = self.get_llm_provider()?;
-
         // Iteratively execute until diagnosis or max steps
-        for step in 0..MAX_EXECUTION_STEPS {
-            debug!("Execution step {} of {}", step + 1, MAX_EXECUTION_STEPS);
+        for step in 0..self.max_steps {
+            debug!(
+                "Execution step {} of {}",
+                step + 1,
+                self.max_steps
+            );
 
             // Call LLM to decide next action
-            let llm_response = provider
+            let llm_response = self
+                .provider
                 .chat(
                     vec![
                         crate::llm::types::ChatMessage::system(SYSTEM_PROMPT),
@@ -118,6 +155,8 @@ impl LLMSkillExecutor {
                     None,
                 )
                 .await?;
+
+            llm_usage.merge_assign(&llm_response.usage);
 
             // Parse LLM response
             let action: SkillAction = match serde_json::from_str(&llm_response.content) {
@@ -167,14 +206,16 @@ impl LLMSkillExecutor {
                     recommendations: action.recommendations,
                     execution_history,
                     output,
+                    llm_usage,
                 });
             }
 
             // Execute the command
             let command = next_command.unwrap();
-            info!("Executing command: {}", command);
+            let command = apply_kubectl_context(&command, kubectl_context);
+            info!(event = "skill_exec_command", command = %command, "executing shell from LLM skill loop");
 
-            let (output, success) = self.execute_shell_command(&command).await;
+            let (output, success) = self.execute_shell_command(&command, kubeconfig).await;
 
             let record = CommandRecord {
                 command: command.clone(),
@@ -184,10 +225,11 @@ impl LLMSkillExecutor {
             execution_history.push(record);
 
             // Update status
+            let out_preview = utf8_prefix_chars(&output, 200);
             current_status = if success {
-                format!("命令执行成功: {}", &output[..output.len().min(200)])
+                format!("命令执行成功: {}", out_preview)
             } else {
-                format!("命令执行失败: {}", &output[..output.len().min(200)])
+                format!("命令执行失败: {}", out_preview)
             };
 
             prompt = Self::build_prompt(
@@ -195,13 +237,14 @@ impl LLMSkillExecutor {
                 user_query,
                 &execution_history,
                 &current_status,
+                self.max_steps,
             );
         }
 
         // Max steps reached
         let diagnosis = format!(
             "诊断步骤已达上限 ({} 步)。当前状态：{}\n\n请人工进一步排查。",
-            MAX_EXECUTION_STEPS, current_status
+            self.max_steps, current_status
         );
 
         let output = Self::format_output(&diagnosis, &vec![], &execution_history);
@@ -212,6 +255,7 @@ impl LLMSkillExecutor {
             recommendations: vec!["请人工进一步排查".to_string()],
             execution_history,
             output,
+            llm_usage,
         })
     }
 
@@ -221,6 +265,7 @@ impl LLMSkillExecutor {
         user_query: &str,
         execution_history: &[CommandRecord],
         current_status: &str,
+        max_steps: usize,
     ) -> String {
         let executed_commands = if execution_history.is_empty() {
             "（尚无已执行的命令）".to_string()
@@ -237,7 +282,7 @@ impl LLMSkillExecutor {
             .replace("{{user_query}}", user_query)
             .replace("{{executed_commands}}", &executed_commands)
             .replace("{{current_status}}", current_status)
-            .replace("{{max_steps}}", &MAX_EXECUTION_STEPS.to_string());
+            .replace("{{max_steps}}", &max_steps.to_string());
 
         prompt
     }
@@ -253,7 +298,7 @@ impl LLMSkillExecutor {
     }
 
     /// Execute a shell command
-    async fn execute_shell_command(&self, command: &str) -> (String, bool) {
+    async fn execute_shell_command(&self, command: &str, kubeconfig: Option<&Path>) -> (String, bool) {
         // Use the skill executor to run the command
         let tool = aiclaw_types::skill::SkillTool {
             name: "shell_command".to_string(),
@@ -262,10 +307,14 @@ impl LLMSkillExecutor {
             command: command.to_string(),
             args: HashMap::new(),
             env: HashMap::new(),
-            timeout_secs: Some(60),
+            timeout_secs: Some(self.shell_timeout.as_secs()),
         };
 
-        match self.skill_executor.execute_tool(&tool, &HashMap::new()).await {
+        match self
+            .skill_executor
+            .execute_tool(&tool, &HashMap::new(), kubeconfig)
+            .await
+        {
             Ok(result) => {
                 if result.success {
                     (result.output.unwrap_or_default(), true)
@@ -335,11 +384,15 @@ impl LLMSkillExecutor {
             output += "|------|------|----------|\n";
             for record in history {
                 let status = if record.success { "✅" } else { "❌" };
-                let summary = if record.output.len() > 50 {
-                    format!("{}...", &record.output[..50])
-                } else {
-                    record.output.clone()
-                }.replace("\n", " ");
+                let summary = {
+                    let s = utf8_prefix_chars(&record.output, 50);
+                    if record.output.chars().count() > 50 {
+                        format!("{}...", s)
+                    } else {
+                        s.to_string()
+                    }
+                }
+                .replace("\n", " ");
                 output += &format!("| `{}` | {} | {} |\n", record.command, status, summary);
             }
         }
@@ -347,12 +400,6 @@ impl LLMSkillExecutor {
         output
     }
 
-    /// Get LLM provider (placeholder - should be injected)
-    fn get_llm_provider(&self) -> anyhow::Result<Arc<dyn LLMProvider>> {
-        // This is a temporary solution - in practice, the provider should be injected
-        // For now, we return an error indicating this needs to be implemented
-        anyhow::bail!("LLM provider not configured for skill executor. Please inject LLM provider.")
-    }
 }
 
 /// System prompt for skill execution
@@ -373,7 +420,8 @@ const SYSTEM_PROMPT: &str = r#"你是一个运维诊断专家。你会收到一�
 重要：
 - 只返回 JSON，不要有其他内容
 - 命令必须是从 SKILL 中选择的，或合理构造的 kubectl 命令
-- 如果 SKILL 中有条件判断，根据结果判断条件是否满足"#;
+- 如果 SKILL 中有条件判断，根据结果判断条件是否满足
+- 集群访问依赖进程环境变量 **`AICLAW_KUBECONFIG`**（本机 kubeconfig 绝对路径）；**不要**引导用户去设置通用环境变量 **`KUBECONFIG`**。若用户已在问题里给出 kubeconfig 路径，视为已提供，**不要重复索要**；若命令输出显示无法连接集群且当前没有可用 kubeconfig，**停止盲跑 kubectl**，请用户用 **`AICLAW_KUBECONFIG=<绝对路径>`** 重启本进程（或在本对话中再次发送该路径以便会话记录）。"#;
 
 /// Action to take from LLM
 #[derive(Debug, serde::Deserialize)]
@@ -386,4 +434,94 @@ struct SkillAction {
     pub diagnosis: Option<String>,
     #[serde(default)]
     pub recommendations: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::traits::LLMProvider;
+    use crate::llm::types::{ChatMessage, ChatOptions, ChatResponse, Usage};
+    use crate::security::command_validator::CommandValidator;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    #[test]
+    fn apply_kubectl_context_inserts_flag() {
+        assert_eq!(
+            apply_kubectl_context("kubectl get pods", Some("prod")),
+            "kubectl --context=prod get pods"
+        );
+        assert_eq!(
+            apply_kubectl_context("  kubectl get ns", Some("c1")),
+            "kubectl --context=c1 get ns"
+        );
+    }
+
+    struct QueuedLlm {
+        queue: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl LLMProvider for QueuedLlm {
+        fn name(&self) -> &str {
+            "queued-mock"
+        }
+
+        fn provider_type(&self) -> &str {
+            "mock"
+        }
+
+        async fn chat(
+            &self,
+            _messages: Vec<ChatMessage>,
+            _options: Option<ChatOptions>,
+        ) -> anyhow::Result<ChatResponse> {
+            let s = self
+                .queue
+                .lock()
+                .map_err(|e| anyhow::anyhow!("lock: {}", e))?
+                .remove(0);
+            Ok(ChatResponse {
+                content: s,
+                model: "mock".to_string(),
+                provider: "mock".to_string(),
+                usage: Usage::zero(),
+                raw_response: serde_json::Value::Null,
+            })
+        }
+
+        async fn health_check(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_skill_loop_respects_deny_all_validator() {
+        let responses = vec![
+            r#"{"next_command":"kubectl get pods","reasoning":"probe","diagnosis":null,"recommendations":[]}"#
+                .to_string(),
+            r#"{"next_command":null,"reasoning":"done","diagnosis":"finished","recommendations":["check RBAC"]}"#
+                .to_string(),
+        ];
+        let provider = Arc::new(QueuedLlm {
+            queue: Mutex::new(responses),
+        });
+        let v = Arc::new(CommandValidator::deny_all());
+        let se = Arc::new(
+            SkillExecutor::with_validator(v).with_timeout(std::time::Duration::from_secs(5)),
+        );
+        let ex = LLMSkillExecutor::new(
+            provider,
+            se,
+            5,
+            std::time::Duration::from_secs(5),
+        );
+        let res = ex
+            .execute_skill("# guide", "hi", &HashMap::new(), None, None)
+            .await
+            .expect("skill exec");
+        assert_eq!(res.execution_history.len(), 1);
+        assert!(!res.execution_history[0].success);
+        assert_eq!(res.diagnosis.as_deref(), Some("finished"));
+    }
 }

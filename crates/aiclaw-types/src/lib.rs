@@ -5,13 +5,11 @@
 pub mod channel;
 pub mod skill;
 pub mod aiops;
-pub mod kubernetes;
 pub mod mcp;
 pub mod agent;
 
 pub use channel::*;
 pub use skill::*;
 pub use aiops::*;
-pub use kubernetes::*;
 pub use mcp::*;
 pub use agent::*;

@@ -2,10 +2,12 @@
 
 pub mod traits;
 pub mod feishu;
+pub mod local;
 pub mod wecom;
 
 pub use traits::*;
 pub use feishu::*;
+pub use local::*;
 pub use wecom::*;
 
 use crate::config::{ChannelConfig, Config};
@@ -26,6 +28,10 @@ impl ChannelFactory {
             }
             ChannelConfig::WeCom(cfg) => {
                 let channel = WeComChannel::new(name, cfg.clone())?;
+                Ok(Box::new(channel))
+            }
+            ChannelConfig::Local(cfg) => {
+                let channel = LocalChannel::new(name, cfg.clone())?;
                 Ok(Box::new(channel))
             }
         }

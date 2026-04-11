@@ -8,6 +8,7 @@ use tracing::{debug, warn};
 
 use crate::llm::intent::IntentClassifierImpl;
 use crate::llm::traits::{IntentClassifier, LLMProvider};
+use crate::llm::types::Usage;
 
 /// Intent parser - parses user messages into structured intents
 /// Uses LLM when available, falls back to regex-based rules
@@ -119,12 +120,12 @@ impl IntentParser {
         ]
     }
 
-    /// Parse a user message into an intent
-    pub async fn parse(&self, message: &str) -> Intent {
+    /// Parse a user message into an intent and return LLM token usage when the classifier ran.
+    pub async fn parse(&self, message: &str) -> (Intent, Usage) {
         // Try LLM first if available
         if let Some(ref classifier) = self.llm_classifier {
             match tokio::time::timeout(self.llm_timeout, classifier.classify(message)).await {
-                Ok(Ok(classification)) => {
+                Ok(Ok((classification, usage))) => {
                     debug!(
                         "LLM classified intent: {} (confidence: {:.2})",
                         classification.intent_type, classification.confidence
@@ -156,12 +157,15 @@ impl IntentParser {
                         entities.service_name = Some(svc);
                     }
 
-                    return Intent {
-                        intent_type,
-                        confidence: classification.confidence,
-                        entities,
-                        raw_query: message.to_string(),
-                    };
+                    return (
+                        Intent {
+                            intent_type,
+                            confidence: classification.confidence,
+                            entities,
+                            raw_query: message.to_string(),
+                        },
+                        usage,
+                    );
                 }
                 Ok(Err(e)) => {
                     warn!("LLM classification failed: {}", e);
@@ -173,7 +177,7 @@ impl IntentParser {
         }
 
         // Fall back to rule-based parsing
-        self.parse_by_rules(message)
+        (self.parse_by_rules(message), Usage::zero())
     }
 
     /// Synchronous parse - uses rules only (for backwards compatibility)

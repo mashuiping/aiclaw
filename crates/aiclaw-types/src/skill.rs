@@ -21,6 +21,9 @@ pub struct SkillMetadata {
     /// Domain-specific tags for routing (gpu, hami, apisix, coredns, etc.)
     #[serde(default)]
     pub domain_tags: Vec<String>,
+    /// Declarative shell/HTTP tools from `SKILL.toml` (merged when co-located with `SKILL.md`).
+    #[serde(default)]
+    pub tools: Vec<SkillTool>,
 }
 
 /// Skill tool definition
@@ -134,6 +137,7 @@ impl SkillManifest {
             raw_content: self.raw_content,
             applicability: self.applicability,
             domain_tags: self.domain_tags,
+            tools: self.tools,
         }
     }
 }

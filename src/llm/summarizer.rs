@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use aiclaw_types::agent::IntentType;
 use crate::llm::traits::LLMProvider;
-use crate::llm::types::{ChatMessage, ChatOptions};
+use crate::llm::types::{ChatMessage, ChatOptions, Usage};
 
 /// Result summarizer - transforms raw tool output into structured, understandable responses
 pub struct Summarizer {
@@ -22,7 +22,7 @@ impl Summarizer {
         intent_type: &IntentType,
         tool_outputs: &[ToolOutput],
         context: &str,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<(String, Usage)> {
         let prompt = self.build_prompt(intent_type, tool_outputs, context);
 
         let messages = vec![
@@ -35,12 +35,12 @@ impl Summarizer {
             .with_max_tokens(2048);
 
         let response = self.provider.chat(messages, Some(options)).await?;
-
-        Ok(response.content)
+        let usage = response.usage.clone();
+        Ok((response.content, usage))
     }
 
     /// Summarize a single piece of text
-    pub async fn summarize_text(&self, text: &str, format_hint: &str) -> anyhow::Result<String> {
+    pub async fn summarize_text(&self, text: &str, format_hint: &str) -> anyhow::Result<(String, Usage)> {
         let messages = vec![
             ChatMessage::system(SYSTEM_PROMPT),
             ChatMessage::user(format!(
@@ -54,7 +54,8 @@ impl Summarizer {
             .with_max_tokens(1024);
 
         let response = self.provider.chat(messages, Some(options)).await?;
-        Ok(response.content)
+        let usage = response.usage.clone();
+        Ok((response.content, usage))
     }
 
     fn build_prompt(&self, intent_type: &IntentType, tool_outputs: &[ToolOutput], context: &str) -> String {
