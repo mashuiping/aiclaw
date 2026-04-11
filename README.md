@@ -1,165 +1,142 @@
-# AIClaw
-
 <p align="center">
-  <img src="assets/mascot.png" alt="" width="280">
+  <img src="assets/mascot.png" alt="AIClaw" width="240">
 </p>
 
-A Rust AI operations agent: enterprise channels (Feishu / WeCom) or a **local channel** (stdio / WebSocket gateway), an **interactive terminal REPL**, filesystem Skills and MCP alongside, VictoriaMetrics when you need metrics, and **`kubectl` on the agent host** (via **`[skills].exec`**) when you need cluster state.
+<h1 align="center">AIClaw</h1>
 
-It loads skills from disk, integrates Model Context Protocol servers (for example VictoriaMetrics MCP), pulls metrics and logs from VictoriaMetrics or Prometheus, and ships with OpenTelemetry tracing for the agent itself. Cluster inspection for Markdown skills is **subprocess `kubectl`**; there is **no in-process Kubernetes API client**—HAMi-style runbooks rely on host **`kubectl`** plus **`[skills].exec`** (and optional **`[clusters.*]`** for **`--context`**).
+<p align="center">
+  <strong>Chat-first AI Ops agent for Kubernetes, observability, and infrastructure diagnostics.</strong>
+</p>
 
-## Repository layout
+<p align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#skills">Skills</a> ·
+  <a href="#architecture">Architecture</a>
+</p>
 
-- `src/`, `Cargo.toml` — `aiclaw` binary and library (workspace root package).
-- `src/repl/` — interactive REPL (line editor, slash commands, streaming replies).
-- `crates/aiclaw-types/` — shared types crate.
-- `skills/` — **example / bundled skills** checked into the repo (`SKILL.toml` or `SKILL.md` per directory). The runtime still loads from whatever path you set in config (usually `~/.aiclaw/skills`); symlink or point `skills_dir` here if you want to use these without copying.
-- `config.example.toml` — full configuration template.
-- `docs/HAMI_PENDING_RUNBOOK.md` — **HAMi GPU Pod 长期 Pending** 的 kubectl 排查指引（与 `skills/inf-k8s-hami-gpu-pod/SKILL.md` 对齐，可不依赖本程序编译）。
+<p align="center">
+  <img alt="Rust 1.87+" src="https://img.shields.io/badge/rust-1.87%2B-orange?logo=rust">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue">
+</p>
 
-## Goals
+---
 
-- **Chat-first ops**: Talk to the agent from enterprise messaging bots instead of context-switching to a dozen consoles.
-- **Skills you own**: Drop-in skills under `~/.aiclaw/skills/` (or another directory via `skills_dir` in config) with a small declarative contract (`SKILL.toml` or Markdown + frontmatter `SKILL.md`).
-- **MCP where it fits**: Reuse observability and tooling through MCP instead of bespoke glue for every backend.
-- **Observable agent**: Trace the orchestrator with OpenTelemetry, not only the workloads it watches.
+AIClaw connects LLMs to your infrastructure through enterprise messaging channels (Feishu / WeCom), a local channel (stdio / WebSocket), or an interactive terminal REPL. It loads filesystem skills, talks to MCP servers, queries VictoriaMetrics or Prometheus, and runs `kubectl` on the agent host — all driven by natural-language conversation.
 
-## Features
+## Quick Start
 
-- **Channels**: Feishu (飞书), WeCom (企业微信), and **Local** (`stdio` one-line-per-message or `http` WebSocket gateway; see `config.example.toml` **`[channels.local]`**)
-- **Interactive REPL**: Terminal mode with **`/help`**, **`/skills`**, skill shortcuts, session save/resume—pass **`--interactive`** or **`-i`**, or start with no remote channels enabled (see **Running** below)
-- **Skill system**: Load and execute skills from the filesystem
-- **MCP client**: Call MCP servers (e.g. VictoriaMetrics MCP)
-- **Observability data**: Metrics and logs via VictoriaMetrics / Prometheus
-- **Cluster workflows**: Host **`kubectl`** (and optional **`helm`**) via **`[skills].exec`**, plus optional **`[clusters.*]`** entries for `kubectl --context` injection and multi-cluster routing
-
-## Architecture
-
-```
-┌─────────────┐     ┌─────────────┐
-│   Feishu    │     │   WeCom     │
-└──────┬──────┘     └──────┬──────┘
-       │                   │
-       └─────────┬─────────┘
-                 ▼
-         ┌───────────────┐
-         │   Channel     │
-         │   Adapter     │
-         └───────┬───────┘
-                 ▼
-         ┌───────────────┐
-         │    Agent      │
-         │ Orchestrator  │
-         └───────┬───────┘
-                 │
-    ┌────────────┼────────────┐
-    ▼            ▼            ▼
-┌───────┐  ┌─────────┐  ┌─────────┐
-│ Skill │  │   MCP   │  │ Intent  │
-│Router │  │ Client  │  │ Parser  │
-└───┬───┘  └────┬────┘  └─────────┘
-    │           │
-    ▼           ▼
-┌───────────────────────────────┐
-│         Integrations         │
-├───────────────────────────────┤
-│ Skills exec │ AIOps Provider │
-│ (kubectl)   │  (Victoria)    │
-└───────────────────────────────┘
-```
-
-## Quick start
-
-### Prerequisites
-
-- Rust **1.87+** (see workspace `rust-version` in `Cargo.toml`)
-- Kubernetes cluster access (optional but needed for cluster workflows)
-- VictoriaMetrics or Prometheus (optional)
-- Feishu / WeCom bot configuration when using those channels
-
-### Installation
+**Prerequisites:** Rust 1.87+ · `kubectl` on PATH (optional, for cluster workflows)
 
 ```bash
-git clone https://github.com/mashuiping/aiclaw.git
-cd aiclaw
-
+git clone https://github.com/mashuiping/aiclaw.git && cd aiclaw
 cargo build --release
 
 mkdir -p ~/.aiclaw
 cp config.example.toml ~/.aiclaw/config.toml
-# Edit secrets, channels, clusters, skills_dir, LLM keys, etc.
-vim ~/.aiclaw/config.toml
+# edit LLM keys, channels, skills_dir, clusters, etc.
 ```
 
-### Configuration highlights
+Run the REPL:
 
-- **Config file resolution**: The binary loads configuration in this order:  
-  1. **`--config` / `-c`** if the path exists (CLI).  
-  2. Otherwise **`AICLAW_CONFIG`** if set and the path exists.  
-  3. Otherwise **`$HOME/.aiclaw/config.toml`** if it exists.  
-  4. Otherwise built-in defaults (often not enough for production; prefer a real file).
-- **`[skills].skills_dir`**: Directory whose **immediate subdirectories** are scanned for skills. To use repo `skills/`, either symlink into `~/.aiclaw/skills` or set `skills_dir` to an **absolute** path to the `skills` folder (leading `~` in TOML paths may not expand everywhere in the stack—prefer absolute paths when in doubt).
-- **`[skills].exec`**: Optional OpenClaw-style loop: when **`enabled`**, a Markdown skill’s **`SKILL.md`** body is fed to the LLM, which proposes shell commands (typically **`kubectl`**) validated by **`security`** (`allowlist` recommended), then executed on the host running `aiclaw`. See **`config.example.toml`** and **[docs/HAMI_PENDING_RUNBOOK.md](docs/HAMI_PENDING_RUNBOOK.md)** §5.
-- **`[clusters.<name>]`**: Optional registry of **logical cluster names** for routing and for **`[skills].exec.prepend_kubectl_context`**: each stanza has **`enabled`** and optional **`context`** (the value passed to `kubectl --context`; when omitted, the table key is used). **Kubeconfig file paths are not stored in `config.toml`.** For **`[skills].exec`**, pass kubeconfig as **`--kubeconfig`** / **`AICLAW_KUBECONFIG`** (absolute path recommended), or mention a path in a user message (`AICLAW_KUBECONFIG=...`, `kubeconfig: ...`, or an absolute path that looks like a config file)—session heuristics can pick it up for channel flows. Skill subprocesses do **not** inherit the parent’s **`KUBECONFIG`** environment variable. Legacy **`[kubernetes.<name>]`** TOML tables are still accepted as an alias for **`[clusters.<name>]`**.
+```bash
+# auto-detected when no remote channels are configured
+./target/release/aiclaw
 
-Example fragment:
+# or force interactive mode
+./target/release/aiclaw -i
+```
+
+Run as a service (Feishu / WeCom / WebSocket listeners):
+
+```bash
+./target/release/aiclaw -c ~/.aiclaw/config.toml
+```
+
+## Features
+
+| | |
+|---|---|
+| **Channels** | Feishu (飞书), WeCom (企业微信), Local (`stdio` / `http` WebSocket gateway) |
+| **Interactive REPL** | Streaming replies, slash commands (`/help`, `/skills`, `/status`, `/model`, `/save`, `/resume`, `/thinkback`), tab completion, session save & resume |
+| **LLM Providers** | OpenAI, Anthropic, DeepSeek, Qwen, Zhipu, MiniMax — with routing via direct, OpenRouter, or Ollama |
+| **Skill System** | Drop-in skills from the filesystem (`SKILL.toml` or `SKILL.md` with YAML frontmatter), with shell / HTTP / script tool types |
+| **Exec Loop** | LLM-driven command execution — the model proposes `kubectl` / `helm` commands, validated by configurable security policy, then executed on the host |
+| **MCP Client** | Stdio JSON-RPC transport to any MCP server (e.g. VictoriaMetrics MCP) |
+| **Observability** | VictoriaMetrics / Prometheus integration for metrics and logs; OpenTelemetry tracing for the agent itself |
+| **Cluster Routing** | Named cluster entries with optional `kubectl --context` injection; multi-cluster support |
+| **Tool Use** | LLM function calling with `bash`, `read_file`, `list_files` tools in REPL mode |
+
+## CLI
+
+```
+aiclaw [OPTIONS]
+
+Options:
+  -i, --interactive          Force interactive REPL mode
+  -c, --config <FILE>        Path to config file
+  -m, --model <MODEL>        Override default LLM model
+  -k, --kubeconfig <FILE>    Path to kubeconfig (or set AICLAW_KUBECONFIG)
+```
+
+**Default mode:** The binary starts the REPL when there are no channel entries, no enabled channels, or only Local with `mode = "stdio"`. Otherwise it runs in service mode. Use `-i` to always get the REPL.
+
+## Configuration
+
+Config file resolution order:
+
+1. `--config` / `-c` (CLI)
+2. `AICLAW_CONFIG` environment variable
+3. `$HOME/.aiclaw/config.toml`
+4. Built-in defaults
+
+Key sections in `config.example.toml`:
 
 ```toml
 [agent]
 name = "aiclaw"
 default_cluster = "prod"
 
+[llm]
+enabled = true
+default_provider = "openai"
+
+[llm.providers.openai]
+enabled = true
+api_key = "${OPENAI_API_KEY}"
+model = "gpt-4o"
+
 [skills]
 skills_dir = "/absolute/path/to/your/skills"
+
+[skills.exec]
+enabled = true
+security = "allowlist"           # deny | allowlist | full
+max_steps = 10
+prepend_kubectl_context = true
+
+[clusters.prod]
+enabled = true
+# context = "my-eks-prod"
 
 [channels.feishu]
 enabled = true
 # ...
 
-[clusters.prod]
+[mcp.servers.victoria]
 enabled = true
-# context = "my-eks-prod"
+command = "npx"
+args = ["-y", "@anthropic/victoria-mcp"]
 ```
 
-### Running
-
-```bash
-# Config: -c/--config if set, else AICLAW_CONFIG, else ~/.aiclaw/config.toml, else defaults
-cargo run
-
-# Force interactive REPL (even when Feishu/WeCom are enabled in config)
-cargo run -- --interactive
-# short form
-cargo run -- -i
-
-# Explicit config file (overrides AICLAW_CONFIG)
-cargo run -- -c /path/to/config.toml
-
-# Optional: override default provider model from CLI (-m / --model)
-cargo run -- -c /path/to/config.toml --model claude-3-5-sonnet-20241022
-
-# Cluster skills (`[skills].exec`): kubeconfig via env or CLI (not stored in config.toml)
-AICLAW_KUBECONFIG=/path/to/kubeconfig cargo run -- -c /path/to/config.toml
-cargo run -- -c /path/to/config.toml --kubeconfig /path/to/kubeconfig
-
-# Release binary path after `cargo build --release`
-./target/release/aiclaw
-```
-
-**Default mode:** If **`--interactive`** is not passed, the binary starts the **REPL** when there are **no channel entries** in config, **no enabled channels**, or the **only** enabled channel is **Local** with **`mode = "stdio"`**. Otherwise it runs **service mode** (channel listeners + orchestrator). Use **`-i`** to always use the REPL locally.
-
-## HAMi GPU Pod pending 排查（不依赖程序是否启动）
-
-若你的目标是 **HAMi 环境下 GPU Pod 一直 Pending**，请直接打开：
-
-- **[docs/HAMI_PENDING_RUNBOOK.md](docs/HAMI_PENDING_RUNBOOK.md)** — 中文步骤清单与前置说明。  
-- 技能全文：**[skills/inf-k8s-hami-gpu-pod/SKILL.md](skills/inf-k8s-hami-gpu-pod/SKILL.md)** — 更细的命令、表与排障逻辑。
-
-以上流程以 **`kubectl` 与集群日志** 为主；即便 AIClaw 进程未运行，也可完整执行。
+> **Kubeconfig** is not stored in config.toml. Pass it via `--kubeconfig`, `AICLAW_KUBECONFIG`, or mention a path in a user message.
 
 ## Skills
 
-Each skill lives in its own directory with **`SKILL.md`** (Markdown + YAML frontmatter) or **`SKILL.toml`**. Example from the repo, `skills/k8s-log-reader/SKILL.toml`:
+Each skill lives in its own directory under `skills_dir` with a `SKILL.toml` or `SKILL.md` manifest.
+
+**TOML example** (`skills/k8s-log-reader/SKILL.toml`):
 
 ```toml
 name = "k8s-log-reader"
@@ -173,18 +150,93 @@ command = "kubectl"
 args = { namespace = "{{namespace}}", pod = "{{pod_name}}" }
 ```
 
-## Usage (channels)
+**Markdown example** (`skills/inf-k8s-hami-gpu-pod/SKILL.md`): YAML frontmatter for metadata, Markdown body for the diagnostic runbook — used by the exec loop to guide LLM-driven `kubectl` commands.
 
-Once the agent is running with at least one channel enabled, interact via your messaging platform, for example:
+### Bundled Skills
+
+| Skill | Format | Description |
+|-------|--------|-------------|
+| `k8s-log-reader` | TOML | Read Kubernetes pod logs |
+| `k8s-health-check` | TOML | Kubernetes cluster health check |
+| `vm-query` | TOML | VictoriaMetrics / Prometheus queries |
+| `inf-k8s-hami-gpu-pod` | Markdown | HAMi GPU pod pending troubleshooting runbook |
+
+> To use the bundled skills, set `skills_dir` to this repo's `skills/` directory or symlink them into `~/.aiclaw/skills`.
+
+## Architecture
 
 ```
-@AIOps ai 网关突发 50x，排查下原因
-@AIOps 集群 xxx，pod xxx 一直 pending，排查下原因
-@AIOps 推理服务 OOM，分析一下可能原因
+                    ┌──────────┐  ┌──────────┐  ┌──────────┐
+                    │  Feishu  │  │  WeCom   │  │  Local   │
+                    └────┬─────┘  └────┬─────┘  └────┬─────┘
+                         │             │              │
+                         └──────┬──────┘──────────────┘
+                                ▼
+                      ┌───────────────────┐
+                      │  Agent            │
+                      │  Orchestrator     │
+                      │                   │
+                      │  Sessions · LLM   │
+                      │  Intent · Routing │
+                      └────┬────┬────┬────┘
+                           │    │    │
+              ┌────────────┘    │    └────────────┐
+              ▼                 ▼                  ▼
+       ┌────────────┐   ┌────────────┐    ┌────────────┐
+       │   Skills   │   │    MCP     │    │   AIOps    │
+       │            │   │   Client   │    │  Provider  │
+       │ TOML · MD  │   │   Pool     │    │            │
+       │ Exec Loop  │   │  (stdio)   │    │ Victoria   │
+       └─────┬──────┘   └────────────┘    │ Prometheus │
+             │                            └────────────┘
+             ▼
+       ┌────────────┐
+       │  kubectl   │
+       │  helm      │
+       │  (host)    │
+       └────────────┘
 ```
 
-## Known limitations
+## Repository Layout
 
-- **Planner / some debug paths** may still use placeholder “simulated” cluster responses; Markdown skills with **`[skills].exec`** run real subprocess **`kubectl`** on the agent host.
-- **`[skills].exec`** requires a working **`[llm]`** default provider, **`kubectl`** on `PATH`, and appropriate RBAC; treat **`security = "full"`** as development-only.
-- **MCP and channels** require valid credentials and network access; optional components can be disabled in `config.toml` for a smaller dev setup.
+```
+├── src/
+│   ├── main.rs              # Entry point, CLI parsing
+│   ├── lib.rs               # Public API surface
+│   ├── agent/               # Orchestrator, sessions
+│   ├── channels/            # Feishu, WeCom, Local adapters
+│   ├── config/              # Config schema and loading
+│   ├── llm/                 # Providers, routing, streaming, intent, summarizer
+│   ├── mcp/                 # MCP client (stdio JSON-RPC)
+│   ├── repl/                # Interactive REPL, commands, tool use
+│   ├── skills/              # Skill loader, registry, executor
+│   ├── aiops/               # Victoria / Prometheus provider
+│   ├── security/            # Command validation, audit
+│   ├── observability/       # Log observer
+│   └── utils/               # Shared helpers
+├── crates/aiclaw-types/     # Shared types crate
+├── skills/                  # Bundled example skills
+├── config.example.toml      # Full configuration template
+└── Cargo.toml               # Workspace manifest
+```
+
+## Usage Examples
+
+Once the agent is running via channels or REPL:
+
+```
+> 网关突发 50x，排查下原因
+> 集群 prod，pod xxx 一直 pending，帮忙看看
+> 推理服务 OOM，分析一下可能原因
+> /k8s-log-reader namespace=default pod=my-app
+```
+
+## Known Limitations
+
+- **No in-process Kubernetes client** — all cluster access is via host `kubectl` subprocess.
+- **`[skills].exec`** requires a working LLM provider, `kubectl` on PATH, and appropriate RBAC. Treat `security = "full"` as development-only.
+- MCP and channels require valid credentials and network access; optional components can be disabled for a smaller dev setup.
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
