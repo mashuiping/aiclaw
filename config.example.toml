@@ -78,15 +78,6 @@ enabled = true
 [clusters.dev]
 enabled = false
 
-# MCP Server Configuration (VictoriaMetrics, etc.)
-[mcp.servers.victoriametrics]
-enabled = true
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-victoriametrics"]
-
-[mcp.transport]
-transport_type = "Stdio"
-
 # AI/OPS Providers
 [aiops.victoria]
 enabled = true

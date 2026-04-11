@@ -4,14 +4,10 @@ use aiclaw_types::agent::{Intent, IntentType};
 use aiclaw_types::skill::SkillMetadata;
 use std::sync::Arc;
 
-use crate::mcp::MCPClientPool;
-
 /// Routing result
 #[derive(Debug, Clone)]
 pub struct RouteResult {
     pub skill_name: Option<String>,
-    pub mcp_server: Option<String>,
-    pub tool_name: Option<String>,
     pub confidence: f32,
 }
 
@@ -19,17 +15,6 @@ impl RouteResult {
     pub fn skill(name: &str, confidence: f32) -> Self {
         Self {
             skill_name: Some(name.to_string()),
-            mcp_server: None,
-            tool_name: None,
-            confidence,
-        }
-    }
-
-    pub fn mcp(server: &str, tool: &str, confidence: f32) -> Self {
-        Self {
-            skill_name: None,
-            mcp_server: Some(server.to_string()),
-            tool_name: Some(tool.to_string()),
             confidence,
         }
     }
@@ -38,7 +23,6 @@ impl RouteResult {
 /// Skill and MCP router - routes intents to appropriate skills or MCP tools
 pub struct Router {
     skill_registry: Arc<dyn SkillRegistryAccess>,
-    mcp_pool: Arc<MCPClientPool>,
 }
 
 pub trait SkillRegistryAccess: Send + Sync {
@@ -49,8 +33,8 @@ pub trait SkillRegistryAccess: Send + Sync {
 }
 
 impl Router {
-    pub fn new(skill_registry: Arc<dyn SkillRegistryAccess>, mcp_pool: Arc<MCPClientPool>) -> Self {
-        Self { skill_registry, mcp_pool }
+    pub fn new(skill_registry: Arc<dyn SkillRegistryAccess>) -> Self {
+        Self { skill_registry }
     }
 
     /// Route an intent to the best matching skill or MCP tool
@@ -59,9 +43,6 @@ impl Router {
 
         let skill_results = self.route_to_skill(intent);
         results.extend(skill_results);
-
-        let mcp_results = self.route_to_mcp(intent);
-        results.extend(mcp_results);
 
         results.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
         results.truncate(3);
@@ -185,37 +166,6 @@ impl Router {
         tags
     }
 
-    /// Route to MCP servers/tools dynamically by matching intent keywords
-    /// against the cached tool names and descriptions from the pool.
-    fn route_to_mcp(&self, intent: &Intent) -> Vec<RouteResult> {
-        let mut results = Vec::new();
-        let intent_tag = match intent.intent_type {
-            IntentType::Logs => "log",
-            IntentType::Metrics => "metric",
-            IntentType::Health => "health",
-            IntentType::Query => "query",
-            _ => return results,
-        };
-
-        let query_lower = intent.raw_query.to_lowercase();
-
-        for (server_name, tool_info) in self.mcp_pool.all_cached_tools() {
-            let name_lower = tool_info.name.to_lowercase();
-            let desc_lower = tool_info.description.to_lowercase();
-
-            let matches = name_lower.contains(intent_tag)
-                || desc_lower.contains(intent_tag)
-                || query_lower.split_whitespace().any(|w| name_lower.contains(w));
-
-            if matches {
-                let confidence = if name_lower.contains(intent_tag) { 0.8 } else { 0.65 };
-                results.push(RouteResult::mcp(&server_name, &tool_info.name, confidence));
-            }
-        }
-
-        results
-    }
-
     /// Calculate confidence for a skill matching an intent
     fn calculate_skill_confidence(&self, skill: &SkillMetadata, intent: &Intent) -> f32 {
         let mut confidence: f32 = 0.4; // Base confidence
@@ -261,7 +211,6 @@ impl Default for Router {
     fn default() -> Self {
         Self {
             skill_registry: Arc::new(DefaultSkillRegistryAccess),
-            mcp_pool: Arc::new(MCPClientPool::new()),
         }
     }
 }

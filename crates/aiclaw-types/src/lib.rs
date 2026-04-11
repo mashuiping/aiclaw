@@ -5,11 +5,9 @@
 pub mod channel;
 pub mod skill;
 pub mod aiops;
-pub mod mcp;
 pub mod agent;
 
 pub use channel::*;
 pub use skill::*;
 pub use aiops::*;
-pub use mcp::*;
 pub use agent::*;

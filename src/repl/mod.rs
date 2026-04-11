@@ -18,7 +18,6 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::llm::traits::LLMProvider;
-use crate::mcp::MCPClientPool;
 use crate::skills::SkillRegistry;
 
 use self::commands::SlashCommand;
@@ -31,7 +30,6 @@ pub async fn run_repl(
     config: &Config,
     llm_provider: Option<Arc<dyn LLMProvider>>,
     skill_registry: Arc<SkillRegistry>,
-    _mcp_pool: Arc<MCPClientPool>,
     kubeconfig: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let renderer = TerminalRenderer::new();
