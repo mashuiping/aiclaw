@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use aiclaw_types::agent::IntentType;
 use crate::llm::traits::LLMProvider;
-use crate::llm::types::{ChatMessage, ChatOptions, Usage};
+use crate::llm::types::{ChatDelta, ChatMessage, ChatOptions, Usage};
 
 /// Result summarizer - transforms raw tool output into structured, understandable responses
 pub struct Summarizer {
@@ -56,6 +56,48 @@ impl Summarizer {
         let response = self.provider.chat(messages, Some(options)).await?;
         let usage = response.usage.clone();
         Ok((response.content, usage))
+    }
+
+    /// Stream-summarize tool outputs. Tokens are sent via `tx`.
+    pub async fn summarize_stream(
+        &self,
+        intent_type: &IntentType,
+        tool_outputs: &[ToolOutput],
+        context: &str,
+        tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> anyhow::Result<()> {
+        let prompt = self.build_prompt(intent_type, tool_outputs, context);
+        let messages = vec![
+            ChatMessage::system(SYSTEM_PROMPT),
+            ChatMessage::user(&prompt),
+        ];
+        let options = ChatOptions::new()
+            .with_temperature(0.3)
+            .with_max_tokens(2048);
+
+        let (inner_tx, mut inner_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Spawn the streaming call
+        let handle = {
+            let tx = inner_tx;
+            self.provider.stream_chat(messages, Some(options), tx)
+        };
+
+        // Forward ChatDelta::TextDelta as string to outer tx
+        while let Some(delta) = inner_rx.recv().await {
+            match delta {
+                ChatDelta::TextDelta(text) => {
+                    let _ = tx.send(text);
+                }
+                ChatDelta::Done { .. } => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        handle.await?;
+        Ok(())
     }
 
     fn build_prompt(&self, intent_type: &IntentType, tool_outputs: &[ToolOutput], context: &str) -> String {

@@ -20,10 +20,11 @@ enabled = true
 bot_name = "AIOps Bot"
 # Webhook URL for receiving messages (set one of webhook_url or long_polling)
 webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-# Long polling configuration
-# app_id = "cli_xxxxxxxxxxxxxxxx"
-# app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-# long_polling_timeout_secs = 30
+# Long polling (recommended for tunnel/dev deployments)
+# Requires: app_id and app_secret from Feishu Open Platform
+app_id = "cli_xxxxxxxxxxxxxxxx"
+app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+polling_timeout_secs = 30
 
 # WeCom (企业微信) Configuration
 [channels.wecom]

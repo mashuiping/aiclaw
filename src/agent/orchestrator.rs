@@ -4,7 +4,9 @@ use aiclaw_types::agent::{AgentResponse, Intent, IntentType, MessageRole, Outgoi
 use aiclaw_types::channel::{ChannelMessage, SendMessage};
 use chrono::Utc;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -27,6 +29,12 @@ use crate::skills::{
 };
 use crate::utils::string::utf8_prefix_chars;
 
+/// Streaming callback type: called with response text for streaming channels.
+/// The callback returns a future that handles the streaming (e.g., appending to
+/// a buffer and flushing to Feishu).
+pub type StreamingCallback =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 /// Agent orchestrator - coordinates all agent components
 pub struct AgentOrchestrator {
     name: String,
@@ -47,6 +55,10 @@ pub struct AgentOrchestrator {
     /// From `AICLAW_KUBECONFIG` at startup; session `kubeconfig_path` takes precedence when present.
     kubeconfig: Option<PathBuf>,
     default_cluster: Option<String>,
+    /// Optional streaming callback for channels that support streaming output.
+    /// Called with the response text after summarization completes.
+    /// Uses RwLock for interior mutability since AgentOrchestrator is behind Arc.
+    streaming_callback: Arc<tokio::sync::RwLock<StreamingCallback>>,
 }
 
 impl AgentOrchestrator {
@@ -81,6 +93,7 @@ impl AgentOrchestrator {
             skills_exec,
             kubeconfig,
             default_cluster: None,
+            streaming_callback: Arc::new(tokio::sync::RwLock::new(Arc::new(|_| Box::pin(async {})))),
         }
     }
 
@@ -135,6 +148,7 @@ impl AgentOrchestrator {
             skills_exec,
             kubeconfig,
             default_cluster,
+            streaming_callback: Arc::new(tokio::sync::RwLock::new(Arc::new(|_| Box::pin(async {})))),
         }
     }
 
@@ -158,6 +172,12 @@ impl AgentOrchestrator {
             body.push_str(&parts.join(" · "));
         }
         body
+    }
+
+    /// Set the streaming callback for channels that support streaming output.
+    /// The callback is invoked with the response text after summarization completes.
+    pub async fn set_streaming_callback(&self, callback: StreamingCallback) {
+        *self.streaming_callback.write().await = callback;
     }
 
     fn effective_kubeconfig_path(&self, session_id: &str) -> Option<PathBuf> {
@@ -498,6 +518,9 @@ impl AgentOrchestrator {
             success = false;
             "抱歉，处理你的请求时遇到了问题，请稍后重试。".to_string()
         };
+
+        // Invoke streaming callback if configured (for channels like Feishu that support streaming)
+        (*self.streaming_callback.read().await)(response_text.clone()).await;
 
         Ok(AgentResponse {
             session_id: String::new(),

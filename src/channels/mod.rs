@@ -4,6 +4,9 @@ pub mod traits;
 pub mod feishu;
 pub mod local;
 pub mod wecom;
+pub mod feishu_api;
+pub mod feishu_card;
+pub mod streaming_buffer;
 
 pub use traits::*;
 pub use feishu::*;
