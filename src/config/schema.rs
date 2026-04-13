@@ -408,9 +408,9 @@ fn default_skills_exec_timeout_secs() -> u64 {
     120
 }
 
-/// VictoriaMetrics connection settings for skill shell execution.
-/// These are injected as environment variables (VM_URL, VM_AUTH_HEADER) when
-/// LLM-driven skills execute curl commands against VictoriaMetrics.
+/// VictoriaMetrics connection settings for skill shell/script execution.
+/// These are injected as environment variables ($VM_METRICS_URL, $VM_LOGS_URL,
+/// $VM_AUTH_HEADER, $VM_AK, $VM_SK) when LLM-driven skills execute against VictoriaMetrics.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VictoriametricsConfig {
     /// Base URL for VictoriaMetrics /select/X/prometheus endpoint (cluster) or
@@ -425,6 +425,14 @@ pub struct VictoriametricsConfig {
     /// When empty, no Authorization header is sent.
     #[serde(default)]
     pub vm_auth_header: Option<String>,
+    /// Access Key for VictoriaMetrics/VictoriaLogs AK/SK authentication.
+    /// When set, VM_AK is injected as an env var into skill script execution.
+    #[serde(default)]
+    pub vm_ak: Option<String>,
+    /// Secret Key for VictoriaMetrics/VictoriaLogs AK/SK authentication.
+    /// When set, VM_SK is injected as an env var into skill script execution.
+    #[serde(default)]
+    pub vm_sk: Option<String>,
 }
 
 impl Default for VictoriametricsConfig {
@@ -433,6 +441,8 @@ impl Default for VictoriametricsConfig {
             vm_metrics_url: None,
             vm_logs_url: None,
             vm_auth_header: None,
+            vm_ak: None,
+            vm_sk: None,
         }
     }
 }

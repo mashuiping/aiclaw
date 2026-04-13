@@ -23,13 +23,40 @@ These are **injected automatically** by AIClaw — do not hardcode values:
 
 ## Auth Pattern
 
-All curl commands below use conditional auth — works for both prod and local:
+### curl (Bearer token or no auth)
 
 ```bash
 curl -s ${VM_AUTH_HEADER:+-H "$VM_AUTH_HEADER"} "$VM_METRICS_URL/api/v1/query?query=up" | jq .
 ```
 
 When `$VM_AUTH_HEADER` is empty, the `-H` flag is omitted automatically.
+
+### Python script (AK/SK auth via aiops platform)
+
+When querying VictoriaMetrics via the aiops platform REST API with AK/SK authentication, use the helper script.
+It supports two endpoints: `queryHistoryPromql` (PromQL range queries) and `queryLatestMetrics` (latest values).
+
+```bash
+# PromQL range query
+python skills/victoriametrics-metrics/vm_query.py query-promql \
+  --query 'rate(http_requests_total{namespace="tai-develop"}[5m])' \
+  --start "$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  --end "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --step 60
+
+# Query latest metric values
+python skills/victoriametrics-metrics/vm_query.py query-latest \
+  --dimensions 'namespace:tai-develop;pod:my-pod-abc123' \
+  --item-names 'cpu_usage,mem_usage'
+```
+
+Environment variables (injected by AIClaw from `[skills.exec.victoriametrics]` config):
+- `$VM_METRICS_URL` — Aiops platform base URL, e.g. `https://aiops.example.com`
+- `$VM_AK` — Access Key (from `vm_ak` config)
+- `$VM_SK` — Secret Key (from `vm_sk` config)
+
+The script replicates the HMAC-SHA256 double-signature scheme from `aiops-api-go-client`.
+Use `--format prometheus` to get pretty-printed Prometheus-format output.
 
 ## Instant Query
 

@@ -28,12 +28,32 @@ These are **injected automatically** by AIClaw — do not hardcode values:
 
 ## Auth Pattern
 
+### curl (Bearer token or no auth)
+
 ```bash
 curl -s ${VM_AUTH_HEADER:+-H "$VM_AUTH_HEADER"} \
   "$VM_LOGS_URL/select/logsql/query?query=*&start=2026-03-07T00:00:00Z&limit=10"
 ```
 
 When `$VM_AUTH_HEADER` is empty, the `-H` flag is omitted automatically.
+
+### Python script (AK/SK auth)
+
+When VictoriaLogs is behind vmauth with AK/SK authentication, use the helper script:
+
+```bash
+python skills/victoriametrics-logs/vl_query.py \
+  --query '{kubernetes_namespace="tai-develop"} kubernetes_pod_instance="infra-platform"' \
+  --start "$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  --limit 100
+```
+
+Environment variables (injected by AIClaw from `[skills.exec.victoriametrics]` config):
+- `$VM_LOGS_URL` — VictoriaLogs base URL, e.g. `https://vlselect.example.com`
+- `$VM_AK` — Access Key (from `vm_ak` config)
+- `$VM_SK` — Secret Key (from `vm_sk` config)
+
+The script replicates the HMAC-SHA256 double-signature scheme from `aiops-api-go-client`.
 
 ## Log Query (Primary)
 

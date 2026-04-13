@@ -329,6 +329,12 @@ impl LLMSkillExecutor {
         if let Some(ref header) = self.vm_config.vm_auth_header {
             tool_env.insert("VM_AUTH_HEADER".to_string(), header.clone());
         }
+        if let Some(ref ak) = self.vm_config.vm_ak {
+            tool_env.insert("VM_AK".to_string(), ak.clone());
+        }
+        if let Some(ref sk) = self.vm_config.vm_sk {
+            tool_env.insert("VM_SK".to_string(), sk.clone());
+        }
 
         // Use the skill executor to run the command
         let tool = aiclaw_types::skill::SkillTool {
