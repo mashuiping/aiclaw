@@ -294,6 +294,10 @@ pub struct LocalConfig {
 pub struct FeishuConfig {
     pub enabled: bool,
 
+    /// Mode: "long_poll", "webhook", or "both" (default: "both")
+    #[serde(default = "default_feishu_mode")]
+    pub mode: String,
+
     #[serde(default)]
     pub bot_name: Option<String>,
 
@@ -318,6 +322,25 @@ pub struct FeishuConfig {
 
     #[serde(default, alias = "long_polling_timeout_secs")]
     pub polling_timeout_secs: u64,
+
+    /// Required for `long_poll` / `both`: Feishu IM container id (see Open Platform "list messages").
+    /// With [`Self::long_poll_container_id_type`] `p2p`, this is typically the peer user's **open_id**
+    /// in the bot's single chat (P2P) session.
+    #[serde(default, alias = "container_id")]
+    pub long_poll_container_id: Option<String>,
+
+    /// IM container type for long polling, e.g. `p2p` or `chat` (Feishu `container_id_type` query).
+    #[serde(default = "default_feishu_long_poll_container_id_type")]
+    pub long_poll_container_id_type: String,
+}
+
+fn default_feishu_mode() -> String {
+    "both".to_string()
+}
+
+fn default_feishu_long_poll_container_id_type() -> String {
+    // Feishu GET im/v1/messages: official values are `chat` (includes p2p) and `thread`, not `p2p`.
+    "chat".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

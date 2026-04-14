@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
-use uuid::Uuid;
 
 /// Incoming message from a channel
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,7 +132,8 @@ pub enum ActionType {
 impl SendMessage {
     pub fn text(recipient: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
-            id: Some(Uuid::new_v4().to_string()),
+            // `id` is reserved for channel-specific update targets (e.g. Feishu `om_…` message_id).
+            id: None,
             recipient: recipient.into(),
             content: OutgoingContent::Text(text.into()),
             thread_id: None,
@@ -143,7 +143,7 @@ impl SendMessage {
 
     pub fn markdown(recipient: impl Into<String>, markdown: impl Into<String>) -> Self {
         Self {
-            id: Some(Uuid::new_v4().to_string()),
+            id: None,
             recipient: recipient.into(),
             content: OutgoingContent::Formatted(FormattedMessage {
                 body: markdown.into(),
@@ -164,7 +164,7 @@ impl SendMessage {
         markdown: impl Into<String>,
     ) -> Self {
         Self {
-            id: Some(Uuid::new_v4().to_string()),
+            id: None,
             recipient: recipient.into(),
             content: OutgoingContent::Formatted(FormattedMessage {
                 body: markdown.into(),

@@ -17,14 +17,21 @@ compact_prompt = false
 [channels.feishu]
 type = "Feishu"
 enabled = true
+# Mode: "long_poll" (receive via long polling), "webhook" (receive via webhook), or "both" (default)
+mode = "long_poll"
 bot_name = "AIOps Bot"
-# Webhook URL for receiving messages (set one of webhook_url or long_polling)
-webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 # Long polling (recommended for tunnel/dev deployments)
 # Requires: app_id and app_secret from Feishu Open Platform
 app_id = "cli_xxxxxxxxxxxxxxxx"
 app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# Required for long_poll: Feishu `container_id` for GET im/v1/messages (with long_poll_container_id_type, default p2p).
+# For p2p, use the user's open_id in the bot single chat, or the id type your deployment uses per Feishu docs.
+# long_poll_container_id = "oc_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # 会话 chat_id（单聊/群聊），见开放平台「群 ID 说明」
+# long_poll_container_id_type = "chat" # 官方取值：chat | thread（默认 chat，含机器人单聊 p2p）
 polling_timeout_secs = 30
+# Webhook mode: URL for receiving events from Feishu (also requires webhook_listen_addr)
+# webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# webhook_listen_addr = "0.0.0.0:8089"
 
 # WeCom (企业微信) Configuration
 [channels.wecom]

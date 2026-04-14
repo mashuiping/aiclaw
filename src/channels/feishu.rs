@@ -13,8 +13,11 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -197,6 +200,46 @@ impl FeishuChannel {
     }
 }
 
+/// Tracks `message_id`s already forwarded to the agent so list-history polls do not replay.
+struct DeliveredMessageIds {
+    order: VecDeque<String>,
+    ids: HashSet<String>,
+    cap: usize,
+}
+
+impl DeliveredMessageIds {
+    fn new(cap: usize) -> Self {
+        Self {
+            order: VecDeque::new(),
+            ids: HashSet::new(),
+            cap,
+        }
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.ids.contains(id)
+    }
+
+    fn insert(&mut self, id: String) {
+        if !self.ids.insert(id.clone()) {
+            return;
+        }
+        self.order.push_back(id);
+        while self.order.len() > self.cap {
+            if let Some(old) = self.order.pop_front() {
+                self.ids.remove(&old);
+            }
+        }
+    }
+}
+
+fn feishu_sender_is_bot(msg: &LongPollMessage) -> bool {
+    matches!(
+        msg.sender.as_ref().map(|s| s.sender_type.as_str()),
+        Some("app") | Some("bot")
+    )
+}
+
 fn convert_long_poll_message(msg: LongPollMessage) -> Option<ChannelMessage> {
     let content: serde_json::Value = serde_json::from_str(&msg.content).ok()?;
     let text = content.get("text").and_then(|t| t.as_str()).unwrap_or("");
@@ -370,20 +413,53 @@ impl Channel for FeishuChannel {
             return Ok(());
         }
 
-        // No ID = create new message
-        let recipient = &msg.recipient;
+        // No ID = create new message. `recipient` is the orchestrator channel map key (e.g. "feishu");
+        // the Feishu API target is `reply_to` (chat_id `oc_…` or user `ou_…`) from the inbound message.
+        let receive_id = msg
+            .reply_to
+            .as_deref()
+            .filter(|s| !s.is_empty() && *s != "stdio")
+            .unwrap_or(msg.recipient.as_str());
+        if receive_id == msg.recipient.as_str() && !receive_id.starts_with("oc_") && !receive_id.starts_with("ou_") {
+            anyhow::bail!(
+                "Feishu send: need reply_to with chat_id (oc_…) or open_id (ou_…); got channel key {:?}",
+                msg.recipient
+            );
+        }
+        let receive_id_type = if receive_id.starts_with("oc_") {
+            "chat_id"
+        } else {
+            "open_id"
+        };
+
         match &msg.content {
             OutgoingContent::Text(text) => {
-                self.api_client.send_text_message(recipient, text).await?;
+                self.api_client
+                    .send_message(receive_id, receive_id_type, "text", &serde_json::json!({ "text": text }).to_string())
+                    .await?;
             }
             OutgoingContent::Formatted(formatted) => {
                 match formatted.format {
                     MessageFormat::Markdown | MessageFormat::Plain => {
                         let card = build_result_card("✅ 完成", &formatted.body);
-                        self.api_client.send_interactive_card(recipient, &card).await?;
+                        self.api_client
+                            .send_message(
+                                receive_id,
+                                receive_id_type,
+                                "interactive",
+                                &card.to_string(),
+                            )
+                            .await?;
                     }
                     MessageFormat::Html => {
-                        self.api_client.send_text_message(recipient, &formatted.body).await?;
+                        self.api_client
+                            .send_message(
+                                receive_id,
+                                receive_id_type,
+                                "text",
+                                &serde_json::json!({ "text": formatted.body }).to_string(),
+                            )
+                            .await?;
                     }
                 }
             }
@@ -392,39 +468,112 @@ impl Channel for FeishuChannel {
     }
 
     async fn listen(&self, tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
-        info!("Starting Feishu channel {} (webhook + long poll)", self.name);
+        let mode = &self.config.mode;
+        info!("Starting Feishu channel {} (mode: {})", self.name, mode);
 
-        // Start long polling if app_id/app_secret are configured
-        if self.config.app_id.is_some() && self.config.app_secret.is_some() {
-            let api_client = self.api_client.clone();
-            let polling_timeout = if self.config.polling_timeout_secs > 0 {
-                self.config.polling_timeout_secs
-            } else {
-                30
-            };
-            let tx_clone = tx.clone();
+        // Start long polling if mode is "long_poll" or "both"
+        if (mode == "long_poll" || mode == "both")
+            && self.config.app_id.is_some()
+            && self.config.app_secret.is_some()
+        {
+            if let Some(container_id) = self.config.long_poll_container_id.clone() {
+                let api_client = self.api_client.clone();
+                let polling_timeout = if self.config.polling_timeout_secs > 0 {
+                    self.config.polling_timeout_secs
+                } else {
+                    30
+                };
+                let container_id_type = self.config.long_poll_container_id_type.clone();
+                let tx_clone = tx.clone();
+                let delivered = Arc::new(Mutex::new(DeliveredMessageIds::new(8_000)));
+                let cold_start = Arc::new(AtomicBool::new(true));
 
-            tokio::spawn(async move {
-                loop {
-                    match api_client.long_poll_messages(polling_timeout).await {
-                        Ok(messages) => {
-                            for msg in messages {
-                                if let Some(channel_msg) = convert_long_poll_message(msg) {
-                                    let _ = tx_clone.send(channel_msg).await;
+                tokio::spawn(async move {
+                    loop {
+                        match api_client
+                            .long_poll_messages(polling_timeout, &container_id, &container_id_type)
+                            .await
+                        {
+                            Ok(messages) => {
+                                // First successful list after process start: record current page as
+                                // "already seen" so we never forward chat history that existed before aiclaw.
+                                if cold_start
+                                    .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                                    .is_ok()
+                                {
+                                    let n = messages.len();
+                                    let mut d = delivered.lock().await;
+                                    for msg in messages {
+                                        d.insert(msg.message_id.clone());
+                                    }
+                                    info!(
+                                        "Feishu long_poll: baseline set ({} message id(s)); pre-start history is ignored",
+                                        n
+                                    );
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                    continue;
                                 }
+                                // API returns newest-first. Stop at first id we already delivered; older
+                                // messages on this page were delivered in a previous poll.
+                                let mut pending: Vec<LongPollMessage> = Vec::new();
+                                {
+                                    let mut d = delivered.lock().await;
+                                    for msg in messages {
+                                        if d.contains(&msg.message_id) {
+                                            break;
+                                        }
+                                        if feishu_sender_is_bot(&msg) {
+                                            d.insert(msg.message_id.clone());
+                                            continue;
+                                        }
+                                        pending.push(msg);
+                                    }
+                                }
+                                // Deliver oldest-first within this batch for sane conversation order.
+                                for msg in pending.into_iter().rev() {
+                                    let mid = msg.message_id.clone();
+                                    match convert_long_poll_message(msg) {
+                                        Some(channel_msg) => {
+                                            if tx_clone.send(channel_msg).await.is_err() {
+                                                break;
+                                            }
+                                            delivered.lock().await.insert(mid);
+                                        }
+                                        None => {
+                                            // Bad payload or filtered; mark so we do not spin on the same id.
+                                            delivered.lock().await.insert(mid);
+                                        }
+                                    }
+                                }
+                                // Avoid hammering the list API; does not replace Feishu event push.
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            }
+                            Err(e) => {
+                                warn!("Feishu long poll error: {}", e);
+                                tokio::time::sleep(Duration::from_secs(5)).await;
                             }
                         }
-                        Err(e) => {
-                            warn!("Feishu long poll error: {}", e);
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                        }
                     }
-                }
-            });
+                });
+            } else if mode == "long_poll" {
+                warn!(
+                    "Feishu channel {}: mode is long_poll but long_poll_container_id is not set; no messages will be received",
+                    self.name
+                );
+            } else {
+                warn!(
+                    "Feishu channel {}: long_poll is enabled in mode both but long_poll_container_id is not set; skipping long poll",
+                    self.name
+                );
+            }
         }
 
-        // Also start webhook server
-        self.listen_webhook(tx).await
+        // Start webhook server if mode is "webhook" or "both"
+        if mode == "webhook" || mode == "both" {
+            self.listen_webhook(tx).await
+        } else {
+            Ok(())
+        }
     }
 
     async fn health_check(&self) -> bool {

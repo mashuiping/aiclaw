@@ -4,7 +4,7 @@ use std::sync::Arc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
 
@@ -51,18 +51,54 @@ struct MessageData {
     message_id: Option<String>,
 }
 
+/// Response wrapper for `GET /open-apis/im/v1/messages` (list chat history).
+/// Feishu returns `data.items` (not `messages`); each item uses `msg_type` and `body.content`.
 #[derive(Debug, Deserialize)]
-struct LongPollResponse {
+struct ListMessagesResponse {
     code: i32,
     msg: String,
-    data: Option<LongPollData>,
+    data: Option<ListMessagesData>,
 }
 
 #[derive(Debug, Deserialize)]
-struct LongPollData {
+struct ListMessagesData {
+    #[serde(default)]
     has_more: bool,
-    sync_tokens: Option<String>,
-    messages: Option<Vec<LongPollMessage>>,
+    #[serde(default)]
+    page_token: Option<String>,
+    #[serde(default)]
+    items: Vec<ListMessageItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListMessageItem {
+    message_id: String,
+    #[serde(default)]
+    root_id: Option<String>,
+    #[serde(default)]
+    parent_id: Option<String>,
+    create_time: String,
+    chat_id: String,
+    #[serde(default)]
+    chat_type: String,
+    #[serde(rename = "msg_type")]
+    msg_type: String,
+    body: ListMessageBody,
+    #[serde(default)]
+    sender: Option<ListMessageSender>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListMessageBody {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListMessageSender {
+    id: String,
+    #[serde(default)]
+    id_type: String,
+    sender_type: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,6 +124,29 @@ pub struct LongPollSender {
 pub struct LongPollSenderId {
     pub open_id: String,
     pub union_id: Option<String>,
+}
+
+fn list_item_to_long_poll(m: ListMessageItem) -> LongPollMessage {
+    let sender = m.sender.map(|s| LongPollSender {
+        sender_id: LongPollSenderId {
+            // List API uses `sender.id` + `sender.id_type` (open_id, app_id, …)
+            open_id: s.id,
+            union_id: None,
+        },
+        sender_type: s.sender_type,
+    });
+
+    LongPollMessage {
+        message_id: m.message_id,
+        root_id: m.root_id,
+        parent_id: m.parent_id,
+        create_time: m.create_time,
+        chat_id: m.chat_id,
+        chat_type: m.chat_type,
+        message_type: m.msg_type,
+        content: m.body.content,
+        sender,
+    }
 }
 
 impl FeishuAPIClient {
@@ -199,12 +258,30 @@ impl FeishuAPIClient {
         Ok(())
     }
 
-    /// Long-poll for new messages
-    pub async fn long_poll_messages(&self, _timeout_secs: u64) -> anyhow::Result<Vec<LongPollMessage>> {
+    /// Pull messages from an IM container (used as the long-poll receive path).
+    ///
+    /// Feishu requires both `container_id` and `container_id_type` for this API; omitting them yields
+    /// HTTP 400 `container_id is required` when `container_id_type` is `p2p`.
+    pub async fn long_poll_messages(
+        &self,
+        _timeout_secs: u64,
+        container_id: &str,
+        container_id_type: &str,
+    ) -> anyhow::Result<Vec<LongPollMessage>> {
         let token = self.get_token().await?;
-        let url = format!("{}/im/v1/messages?receive_id_type=open_id&container_id_type=p2p", FEISHU_API_BASE);
+        let url = format!("{}/im/v1/messages", FEISHU_API_BASE);
 
-        let resp = self.client.get(&url)
+        // Newest first so each poll can stop at the first already-handled id and avoid re-queuing history.
+        // Default API order is ascending, which repeats the same oldest page forever.
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[
+                ("container_id", container_id),
+                ("container_id_type", container_id_type),
+                ("sort_type", "ByCreateTimeDesc"),
+                ("page_size", "50"),
+            ])
             .header("Authorization", format!("Bearer {}", token))
             .header("X-Tt-Logid", "aiclaw-long-poll")
             .send()
@@ -213,21 +290,28 @@ impl FeishuAPIClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            debug!("Feishu long poll: {} - {}", status, body_text);
+            warn!("Feishu long poll: {} - {}", status, body_text);
             return Ok(Vec::new());
         }
 
-        let poll_resp: LongPollResponse = resp.json().await?;
+        let poll_resp: ListMessagesResponse = resp.json().await?;
 
         if poll_resp.code != 0 {
-            debug!("Feishu long poll empty: {}", poll_resp.msg);
+            debug!("Feishu list messages API: {}", poll_resp.msg);
             return Ok(Vec::new());
         }
 
-        Ok(poll_resp.data.and_then(|d| d.messages).unwrap_or_default())
+        let items = poll_resp.data.map(|d| d.items).unwrap_or_default();
+        Ok(items.into_iter().map(list_item_to_long_poll).collect())
     }
 
-    async fn send_message(&self, receive_id: &str, receive_id_type: &str, msg_type: &str, content: &str) -> anyhow::Result<String> {
+    pub async fn send_message(
+        &self,
+        receive_id: &str,
+        receive_id_type: &str,
+        msg_type: &str,
+        content: &str,
+    ) -> anyhow::Result<String> {
         let token = self.get_token().await?;
         let url = format!("{}/im/v1/messages?receive_id_type={}", FEISHU_API_BASE, receive_id_type);
 
