@@ -26,7 +26,10 @@ impl SessionManager {
         }
     }
 
-    /// Create a new session
+    /// Create a new session.
+    ///
+    /// The session is stored under both its UUID (for direct lookups by ID) and
+    /// the composite key (for `get_or_create` lookups).
     pub fn create_session(
         &self,
         user_id: &str,
@@ -34,6 +37,7 @@ impl SessionManager {
         thread_id: Option<&str>,
     ) -> Arc<Session> {
         let session_id = uuid::Uuid::new_v4().to_string();
+        let composite_key = self.session_key(user_id, channel, thread_id);
         let now = Utc::now();
 
         let session = Session {
@@ -49,7 +53,9 @@ impl SessionManager {
 
         let session = Arc::new(session);
 
+        // Insert under both UUID and composite key so both lookup paths work.
         self.sessions.insert(session_id.clone(), session.clone());
+        self.sessions.insert(composite_key, session.clone());
 
         self.user_sessions
             .entry(user_id.to_string())

@@ -56,14 +56,16 @@ impl IntentClassifierImpl {
             let remaining = &content[start..];
             // Find matching closing brace
             let mut depth = 0;
-            for (i, c) in remaining.chars().enumerate() {
-                if c == '{' {
-                    depth += 1;
-                } else if c == '}' {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(remaining[..=i].to_string());
+            for (byte_idx, c) in remaining.char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(remaining[..=byte_idx].to_string());
+                        }
                     }
+                    _ => {}
                 }
             }
         }
@@ -71,8 +73,12 @@ impl IntentClassifierImpl {
         None
     }
 
+    /// Emergency fallback: coarse intent classification only.
+    ///
+    /// Domain, virtualization, resource-state and error-keyword extraction is
+    /// intentionally left to the LLM classifier. This fallback only needs to
+    /// pick the broad intent type so the pipeline can proceed.
     fn fallback_classify(message: &str) -> IntentClassification {
-        // Simple rule-based fallback with domain awareness
         let message_lower = message.to_lowercase();
 
         let (intent_type, confidence) = if message_lower.contains("日志")
@@ -116,48 +122,11 @@ impl IntentClassifierImpl {
             ("Unknown", 0.3)
         };
 
-        // Extract domain entities
-        let mut entities = IntentEntities::default();
-
-        // Domain detection
-        if message_lower.contains("gpu") || message_lower.contains("nvidia") {
-            entities.domain = Some("gpu".to_string());
-        } else if message_lower.contains("storage") || message_lower.contains("pvc") {
-            entities.domain = Some("storage".to_string());
-        } else if message_lower.contains("network") || message_lower.contains("网络") {
-            entities.domain = Some("network".to_string());
-        }
-
-        // Virtualization detection
-        if message_lower.contains("hami") {
-            entities.virtualization = Some("hami".to_string());
-        } else if message_lower.contains("vgpu") {
-            entities.virtualization = Some("vgpu".to_string());
-        }
-
-        // Resource state detection
-        if message_lower.contains("pending") || message_lower.contains("等待") {
-            entities.resource_state = Some("pending".to_string());
-        } else if message_lower.contains("crashloop") {
-            entities.resource_state = Some("crashloop".to_string());
-        } else if message_lower.contains("oom") || message_lower.contains("内存") {
-            entities.resource_state = Some("oom".to_string());
-        }
-
-        // Error keyword detection
-        if message_lower.contains("502") {
-            entities.error_keyword = Some("502".to_string());
-        } else if message_lower.contains("500") {
-            entities.error_keyword = Some("500".to_string());
-        } else if message_lower.contains("404") {
-            entities.error_keyword = Some("404".to_string());
-        }
-
         IntentClassification {
             intent_type: intent_type.to_string(),
             confidence,
-            entities,
-            reasoning: Some("Fallback classification based on keywords".to_string()),
+            entities: IntentEntities::default(),
+            reasoning: Some("Fallback: coarse intent only".to_string()),
         }
     }
 }

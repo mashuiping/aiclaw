@@ -16,7 +16,11 @@ impl Summarizer {
         Self { provider }
     }
 
-    /// Summarize tool execution results based on intent type
+    /// Summarize tool execution results based on intent type.
+    ///
+    /// Uses a unified prompt that provides the intent as context rather than
+    /// prescribing fixed analysis steps per intent type. The LLM determines
+    /// the appropriate analysis structure based on the actual data.
     pub async fn summarize(
         &self,
         intent_type: &IntentType,
@@ -31,7 +35,7 @@ impl Summarizer {
         ];
 
         let options = ChatOptions::new()
-            .with_temperature(0.3) // Lower temperature for more consistent output
+            .with_temperature(0.3)
             .with_max_tokens(2048);
 
         let response = self.provider.chat(messages, Some(options)).await?;
@@ -113,146 +117,27 @@ impl Summarizer {
                 .join("\n")
         };
 
-        match intent_type {
-            IntentType::Logs => format!(
-                r#"你是运维日志分析专家。用户正在排查问题，请分析以下日志输出。
+        let intent_hint = match intent_type {
+            IntentType::Logs => "用户正在分析日志数据",
+            IntentType::Metrics => "用户正在分析监控指标",
+            IntentType::Health => "用户正在检查系统健康状态",
+            IntentType::Debug => "用户正在排查故障根因",
+            IntentType::Query => "用户正在查询数据",
+            IntentType::Scale => "用户正在评估扩缩容",
+            IntentType::Deploy => "用户正在检查部署状态",
+            IntentType::Unknown => "用户发起了一个运维请求",
+        };
 
-意图类型: {}
-上下文: {}
+        format!(
+            r#"场景: {intent_hint}
+意图类型: {intent_name}
+用户上下文: {context}
 
-{}
+{tool_outputs_text}
 
-请用 Markdown 格式总结：
-1. **日志概览**：总行数、时间范围（如可判断）
-2. **关键发现**：ERROR/WARN/异常模式
-3. **可能原因**：基于日志内容的推断
-4. **建议操作**：下一步排查建议（如有）
-
-请用中文回答。"#,
-                intent_name, context, tool_outputs_text
-            ),
-
-            IntentType::Metrics => format!(
-                r#"你是运维指标分析专家。用户正在查看监控指标，请分析以下指标数据。
-
-意图类型: {}
-上下文: {}
-
-{}
-
-请用 Markdown 格式总结：
-1. **指标概览**：主要指标名称和当前值
-2. **趋势分析**：上升/下降/稳定
-3. **异常检测**：是否超过阈值或存在异常模式
-4. **根因分析**：可能的性能问题原因
-5. **优化建议**：如有问题，提出解决建议
-
-请用中文回答，尽量用表格展示数据。"#,
-                intent_name, context, tool_outputs_text
-            ),
-
-            IntentType::Health => format!(
-                r#"你是运维健康检查专家。请分析以下集群/服务健康状态。
-
-意图类型: {}
-上下文: {}
-
-{}
-
-请用 Markdown 格式总结：
-1. **健康状态**：✅ 正常 / ⚠️ 警告 / ❌ 异常
-2. **组件状态**：各组件的运行状态
-3. **问题清单**：发现的问题（如有）
-4. **处理建议**：如有问题，建议的处理步骤
-
-请用中文回答。"#,
-                intent_name, context, tool_outputs_text
-            ),
-
-            IntentType::Debug => format!(
-                r#"你是运维故障排查专家。用户正在排查问题，请综合分析以下数据找出根因。
-
-意图类型: {}
-上下文: {}
-
-{}
-
-请用 Markdown 格式总结：
-1. **问题确认**：确认的问题现象
-2. **根因分析**：最可能的根本原因（给出分析过程）
-3. **证据支持**：支持根因判断的具体证据
-4. **修复建议**：具体的修复步骤（优先级排序）
-5. **预防措施**：如何避免类似问题
-
-请用中文回答，分析要有逻辑性。"#,
-                intent_name, context, tool_outputs_text
-            ),
-
-            IntentType::Query => format!(
-                r#"你是数据查询专家。请总结以下查询结果。
-
-意图类型: {}
-上下文: {}
-
-{}
-
-请用 Markdown 格式总结：
-1. **查询结果**：关键数据
-2. **结果分析**：数据含义
-3. **补充说明**：如有
-
-请用中文回答，尽量用表格展示结构化数据。"#,
-                intent_name, context, tool_outputs_text
-            ),
-
-            IntentType::Scale => format!(
-                r#"你是运维扩缩容专家。请分析以下扩缩容相关状态。
-
-意图类型: {}
-上下文: {}
-
-{}
-
-请用 Markdown 格式总结：
-1. **当前状态**：当前副本数、资源使用
-2. **扩缩建议**：建议的扩缩方案
-3. **影响评估**：扩缩容对服务的影响
-
-请用中文回答。"#,
-                intent_name, context, tool_outputs_text
-            ),
-
-            IntentType::Deploy => format!(
-                r#"你是运维部署专家。请分析以下部署状态。
-
-意图类型: {}
-上下文: {}
-
-{}
-
-请用 Markdown 格式总结：
-1. **部署状态**：成功/失败/进行中
-2. **版本信息**：当前版本（如有）
-3. **问题处理**：部署中的问题及建议
-
-请用中文回答。"#,
-                intent_name, context, tool_outputs_text
-            ),
-
-            _ => format!(
-                r#"请总结以下运维工具的输出结果。
-
-意图类型: {}
-上下文: {}
-
-{}
-
-请用简洁的 Markdown 格式总结关键信息和发现。
-
-请用中文回答。"#,
-                intent_name, context, tool_outputs_text
-            ),
-        }
+请基于以上数据进行分析。根据数据内容自行决定最合适的分析结构和重点，
+用 Markdown 格式输出。突出关键发现、异常和可操作的建议。请用中文回答。"#
+        )
     }
 }
 

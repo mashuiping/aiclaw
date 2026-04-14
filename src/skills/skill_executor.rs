@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+use crate::config::VictoriametricsConfig;
 use crate::llm::traits::LLMProvider;
 use crate::llm::types::Usage;
 use crate::skills::SkillExecutor;
@@ -31,38 +32,38 @@ pub fn apply_kubectl_context(command: &str, context: Option<&str>) -> String {
 }
 
 /// Prompt for LLM to decide next action given skill and context
-const SKILL_EXECUTION_PROMPT: &str = r#"你是运维诊断专家。请根据以下 Skill 的内容，帮助用户诊断问题。
+const SKILL_EXECUTION_PROMPT: &str = r#"You are an operations diagnostics expert. Use the skill content below to help the user diagnose the problem.
 
-## Skill 内容
+## Skill Content
 {{skill_content}}
 
-## 用户问题
+## User Question
 {{user_query}}
 
-## 已执行的命令和结果
+## Executed Commands and Results
 {{executed_commands}}
 
-## 当前状态
+## Current Status
 {{current_status}}
 
-请分析以上信息，决定下一步：
+Analyze the information above and decide the next step:
 
-1. 如果诊断尚未完成，选择一个合适的命令执行（从 Skill 中选择或根据实际情况构造）
-2. 如果已收集到足够信息，给出最终诊断结论
+1. If diagnosis is not complete, choose an appropriate command to execute (from the Skill or construct one based on the situation)
+2. If enough information has been collected, provide the final diagnosis
 
-直接返回 JSON 格式：
+Return JSON directly:
 {
-  "next_command": "kubectl describe pod xxx -n yyy",  // 或 null 表示诊断完成
-  "reasoning": "因为结果显示...，需要进一步检查...",
-  "diagnosis": null,  // 如果诊断完成，填写诊断结论
-  "recommendations": ["建议1", "建议2"]  // 如果诊断完成，填写建议
+  "next_command": "kubectl describe pod xxx -n yyy",  // or null when diagnosis is complete
+  "reasoning": "Because the results show..., need to further check...",
+  "diagnosis": null,  // fill in diagnosis conclusion when complete
+  "recommendations": ["recommendation 1", "recommendation 2"]  // fill in when complete
 }
 
-重要：
-- 命令必须从 Skill 中提供的命令中选择，或根据实际情况构造合理的 kubectl 命令
-- 如果 Skill 包含条件判断，根据命令结果判断条件是否满足
-- 最多执行 {{max_steps}} 步，如果仍未诊断清楚，给出当前最佳判断
-- 若多次 kubectl/helm 失败且疑似缺少集群凭证，**不要继续循环执行同类命令**；请用户通过 **`AICLAW_KUBECONFIG=<绝对路径>`** 启动本程序。用户若已在「用户问题」中写明 kubeconfig 路径，**不要再次询问路径**。"#;
+Important:
+- Commands should be chosen from those provided in the Skill, or construct reasonable kubectl commands based on the situation
+- If the Skill contains conditional logic, evaluate conditions based on command results
+- Execute at most {{max_steps}} steps; if still unclear, provide your best judgment
+- If kubectl/helm commands fail repeatedly (likely missing cluster credentials), **stop retrying**; ask the user to start the program with **`AICLAW_KUBECONFIG=<absolute_path>`**. If the user already specified a kubeconfig path in their question, **do not ask again**."#;
 
 /// Result of skill execution
 #[derive(Debug)]
@@ -95,6 +96,8 @@ pub struct LLMSkillExecutor {
     skill_executor: Arc<SkillExecutor>,
     max_steps: usize,
     shell_timeout: Duration,
+    /// VictoriaMetrics connection settings injected as env vars into shell commands.
+    vm_config: VictoriametricsConfig,
 }
 
 impl LLMSkillExecutor {
@@ -109,6 +112,24 @@ impl LLMSkillExecutor {
             skill_executor,
             max_steps: max_steps.max(1),
             shell_timeout,
+            vm_config: VictoriametricsConfig::default(),
+        }
+    }
+
+    /// Create with VictoriaMetrics config for env var injection.
+    pub fn with_vm_config(
+        provider: Arc<dyn LLMProvider>,
+        skill_executor: Arc<SkillExecutor>,
+        max_steps: usize,
+        shell_timeout: Duration,
+        vm_config: VictoriametricsConfig,
+    ) -> Self {
+        Self {
+            provider,
+            skill_executor,
+            max_steps: max_steps.max(1),
+            shell_timeout,
+            vm_config,
         }
     }
 
@@ -277,14 +298,12 @@ impl LLMSkillExecutor {
                 .join("\n")
         };
 
-        let prompt = SKILL_EXECUTION_PROMPT
+        SKILL_EXECUTION_PROMPT
             .replace("{{skill_content}}", skill_content)
             .replace("{{user_query}}", user_query)
             .replace("{{executed_commands}}", &executed_commands)
             .replace("{{current_status}}", current_status)
-            .replace("{{max_steps}}", &max_steps.to_string());
-
-        prompt
+            .replace("{{max_steps}}", &max_steps.to_string())
     }
 
     /// Interpolate parameters into command
@@ -299,6 +318,24 @@ impl LLMSkillExecutor {
 
     /// Execute a shell command
     async fn execute_shell_command(&self, command: &str, kubeconfig: Option<&Path>) -> (String, bool) {
+        // Build env vars: VM connection settings for VictoriaMetrics skill curls.
+        let mut tool_env: HashMap<String, String> = HashMap::new();
+        if let Some(ref url) = self.vm_config.vm_metrics_url {
+            tool_env.insert("VM_METRICS_URL".to_string(), url.clone());
+        }
+        if let Some(ref url) = self.vm_config.vm_logs_url {
+            tool_env.insert("VM_LOGS_URL".to_string(), url.clone());
+        }
+        if let Some(ref header) = self.vm_config.vm_auth_header {
+            tool_env.insert("VM_AUTH_HEADER".to_string(), header.clone());
+        }
+        if let Some(ref ak) = self.vm_config.vm_ak {
+            tool_env.insert("VM_AK".to_string(), ak.clone());
+        }
+        if let Some(ref sk) = self.vm_config.vm_sk {
+            tool_env.insert("VM_SK".to_string(), sk.clone());
+        }
+
         // Use the skill executor to run the command
         let tool = aiclaw_types::skill::SkillTool {
             name: "shell_command".to_string(),
@@ -306,7 +343,7 @@ impl LLMSkillExecutor {
             kind: aiclaw_types::skill::ToolKind::Shell,
             command: command.to_string(),
             args: HashMap::new(),
-            env: HashMap::new(),
+            env: tool_env,
             timeout_secs: Some(self.shell_timeout.as_secs()),
         };
 
@@ -333,7 +370,7 @@ impl LLMSkillExecutor {
         // Check for markdown code block
         if content.contains("```json") {
             let start = content.find("```json").unwrap() + 7;
-            let end = content[start..].find("```").map(|i| start + i);
+            let end = content[start..].find("```");
             return end.map(|e| content[start..e].trim().to_string());
         }
 
@@ -346,13 +383,13 @@ impl LLMSkillExecutor {
         // Try to find JSON directly
         if content.starts_with('{') {
             let mut depth = 0;
-            for (i, c) in content.chars().enumerate() {
+            for (byte_idx, c) in content.char_indices() {
                 if c == '{' {
                     depth += 1;
                 } else if c == '}' {
                     depth -= 1;
                     if depth == 0 {
-                        return Some(content[..=i].to_string());
+                        return Some(content[..=byte_idx].to_string());
                     }
                 }
             }

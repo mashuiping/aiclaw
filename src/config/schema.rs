@@ -171,9 +171,6 @@ pub struct Config {
     pub skills: SkillsConfig,
 
     #[serde(default)]
-    pub mcp: MCPConfig,
-
-    #[serde(default)]
     pub aiops: HashMap<String, AIOpsProviderConfig>,
 
     /// Logical cluster name → kubectl `--context` mapping (host `kubectl` only; no in-process K8s client).
@@ -398,6 +395,9 @@ pub struct SkillsExecConfig {
     /// When `security = allowlist`, also allow `helm list|get|status|version` style reads.
     #[serde(default)]
     pub allow_helm: bool,
+    /// VictoriaMetrics connection for LLM-driven skill execution.
+    #[serde(default)]
+    pub victoriametrics: VictoriametricsConfig,
 }
 
 fn default_skills_exec_max_steps() -> usize {
@@ -406,6 +406,45 @@ fn default_skills_exec_max_steps() -> usize {
 
 fn default_skills_exec_timeout_secs() -> u64 {
     120
+}
+
+/// VictoriaMetrics connection settings for skill shell/script execution.
+/// These are injected as environment variables ($VM_METRICS_URL, $VM_LOGS_URL,
+/// $VM_AUTH_HEADER, $VM_AK, $VM_SK) when LLM-driven skills execute against VictoriaMetrics.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VictoriametricsConfig {
+    /// Base URL for VictoriaMetrics /select/X/prometheus endpoint (cluster) or
+    /// http://host:8428 (single-node). Example: https://vmselect.example.com/select/0/prometheus
+    #[serde(default)]
+    pub vm_metrics_url: Option<String>,
+    /// Base URL for VictoriaLogs /select/logsql endpoint.
+    /// Example: https://vlselect.example.com
+    #[serde(default)]
+    pub vm_logs_url: Option<String>,
+    /// Optional auth header value, e.g. "Bearer <token>".
+    /// When empty, no Authorization header is sent.
+    #[serde(default)]
+    pub vm_auth_header: Option<String>,
+    /// Access Key for VictoriaMetrics/VictoriaLogs AK/SK authentication.
+    /// When set, VM_AK is injected as an env var into skill script execution.
+    #[serde(default)]
+    pub vm_ak: Option<String>,
+    /// Secret Key for VictoriaMetrics/VictoriaLogs AK/SK authentication.
+    /// When set, VM_SK is injected as an env var into skill script execution.
+    #[serde(default)]
+    pub vm_sk: Option<String>,
+}
+
+impl Default for VictoriametricsConfig {
+    fn default() -> Self {
+        Self {
+            vm_metrics_url: None,
+            vm_logs_url: None,
+            vm_auth_header: None,
+            vm_ak: None,
+            vm_sk: None,
+        }
+    }
 }
 
 impl Default for SkillsExecConfig {
@@ -417,6 +456,7 @@ impl Default for SkillsExecConfig {
             timeout_secs: default_skills_exec_timeout_secs(),
             prepend_kubectl_context: false,
             allow_helm: false,
+            victoriametrics: VictoriametricsConfig::default(),
         }
     }
 }
@@ -430,33 +470,6 @@ fn default_skills_dir() -> PathBuf {
 
 fn default_open_skills_enabled() -> bool {
     false
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct MCPConfig {
-    #[serde(default)]
-    pub servers: HashMap<String, MCPServerConfig>,
-
-    #[serde(default)]
-    pub transport: MCPTransport,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(tag = "transport_type")]
-pub enum MCPTransport {
-    #[default]
-    Stdio,
-    SSE { url: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct MCPServerConfig {
-    pub enabled: bool,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -583,7 +596,6 @@ impl Default for Config {
             agent: AgentConfig::default(),
             channels: HashMap::new(),
             skills: SkillsConfig::default(),
-            mcp: MCPConfig::default(),
             aiops: HashMap::new(),
             clusters: HashMap::new(),
             observability: ObservabilityConfig::default(),
@@ -615,15 +627,6 @@ impl Default for SkillsConfig {
             allowed_scripts: false,
             trusted_skill_roots: Vec::new(),
             exec: SkillsExecConfig::default(),
-        }
-    }
-}
-
-impl Default for MCPConfig {
-    fn default() -> Self {
-        Self {
-            servers: HashMap::new(),
-            transport: MCPTransport::Stdio,
         }
     }
 }

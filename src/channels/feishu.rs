@@ -31,6 +31,7 @@ use crate::config::FeishuConfig;
 #[derive(Clone)]
 struct FeishuWebhookState {
     tx: mpsc::Sender<ChannelMessage>,
+    channel_name: String,
     verify_token: Option<String>,
 }
 
@@ -68,7 +69,7 @@ async fn feishu_webhook_event(
 
     // Try to parse as FeishuEvent first
     if let Ok(event) = serde_json::from_value::<FeishuEvent>(payload.clone()) {
-        match forward_feishu_event(&state.tx, event).await {
+        match forward_feishu_event(&state.tx, &state.channel_name, event).await {
             Ok(()) => (StatusCode::OK, "ok").into_response(),
             Err(e) => {
                 error!("Failed to forward Feishu webhook event: {}", e);
@@ -82,7 +83,7 @@ async fn feishu_webhook_event(
                 header,
                 event,
             };
-            match forward_feishu_event(&state.tx, full_event).await {
+            match forward_feishu_event(&state.tx, &state.channel_name, full_event).await {
                 Ok(()) => (StatusCode::OK, "ok").into_response(),
                 Err(e) => {
                     error!("Failed to forward Feishu webhook event: {}", e);
@@ -101,6 +102,7 @@ async fn feishu_webhook_event(
 
 async fn forward_feishu_event(
     tx: &mpsc::Sender<ChannelMessage>,
+    channel_name: &str,
     event: FeishuEvent,
 ) -> anyhow::Result<()> {
     // Extract all needed fields from event before consuming event.event.message
@@ -134,10 +136,11 @@ async fn forward_feishu_event(
                 mentions.iter().map(|m| Mention {
                     id: m.id.open_id.clone().unwrap_or_default(),
                     name: m.key.clone(),
-                    mention_type: if m.mention_type == "at" {
-                        MentionType::User
-                    } else {
-                        MentionType::User
+                    mention_type: match m.mention_type.as_str() {
+                        "at" => MentionType::User,
+                        "here" => MentionType::Here,
+                        "channel" => MentionType::Channel,
+                        _ => MentionType::Channel,
                     },
                 }).collect()
             })
@@ -145,7 +148,7 @@ async fn forward_feishu_event(
 
         let channel_msg = ChannelMessage {
             id: message_id,
-            channel_name: "feishu".to_string(),
+            channel_name: channel_name.to_string(),
             channel_id: chat_id,
             sender: sender_info,
             content: MessageContent {
@@ -450,6 +453,7 @@ impl FeishuChannel {
 
         let state = FeishuWebhookState {
             tx,
+            channel_name: self.name.clone(),
             verify_token: self.config.verify_token.clone(),
         };
 
@@ -465,5 +469,74 @@ impl FeishuChannel {
 
         axum::serve(listener, app).await?;
         Ok(())
+    }
+
+    async fn listen_long_polling(&self, tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+        info!("Feishu long polling listener started");
+
+        let app_id = self
+            .config
+            .app_id
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Feishu app_id not configured"))?;
+        let app_secret = self
+            .config
+            .app_secret
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Feishu app_secret not configured"))?;
+
+        let tenant_access_token = self.get_tenant_access_token(app_id, app_secret).await?;
+
+        loop {
+            match self.fetch_long_polling_events(&tenant_access_token).await {
+                Ok(events) => {
+                    for event in events {
+                        if let Err(e) = self.process_event(&tx, event).await {
+                            error!("Error processing Feishu event: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Feishu long polling error: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
+
+    async fn get_tenant_access_token(&self, app_id: &str, app_secret: &str) -> anyhow::Result<String> {
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal")
+            .json(&serde_json::json!({
+                "app_id": app_id,
+                "app_secret": app_secret
+            }))
+            .send()
+            .await?;
+
+        #[derive(Deserialize)]
+        struct TokenResponse {
+            #[allow(dead_code)]
+            code: i32,
+            msg: String,
+            tenant_access_token: Option<String>,
+        }
+
+        let token_resp: TokenResponse = response.json().await?;
+        token_resp.tenant_access_token
+            .ok_or_else(|| anyhow::anyhow!("Failed to get tenant access token: {}", token_resp.msg))
+    }
+
+    async fn fetch_long_polling_events(&self, _token: &str) -> anyhow::Result<Vec<FeishuEvent>> {
+        Ok(Vec::new())
+    }
+
+    async fn process_event(
+        &self,
+        tx: &mpsc::Sender<ChannelMessage>,
+        event: FeishuEvent,
+    ) -> anyhow::Result<()> {
+        forward_feishu_event(tx, &self.name, event).await
     }
 }

@@ -59,6 +59,20 @@ timeout_secs = 120
 prepend_kubectl_context = false
 allow_helm = false
 
+# VictoriaMetrics connection — injected as $VM_METRICS_URL, $VM_LOGS_URL, $VM_AUTH_HEADER, $VM_AK, $VM_SK
+# when LLM-driven skills execute curl commands or Python scripts.
+[skills.exec.victoriametrics]
+# Base URL for VictoriaMetrics /select/X/prometheus endpoint (cluster) or http://host:8428 (single-node).
+vm_metrics_url = "http://localhost:8428"
+# Base URL for VictoriaLogs /select/logsql endpoint.
+vm_logs_url = "http://localhost:8428"
+# Optional auth header, e.g. "Bearer <token>". Leave empty for no auth (used by curl-based tools).
+vm_auth_header = ""
+# Access Key for aiops platform AK/SK auth (used by Python script tools).
+# vm_ak = ""
+# Secret Key for aiops platform AK/SK auth (used by Python script tools).
+# vm_sk = ""
+
 # Logical cluster registry: maps intent / default_cluster names to kubectl --context (host kubectl only).
 # If `context` is omitted, the TOML table key (e.g. prod) is used as the kubectl context name.
 # Legacy top-level table name `[kubernetes.<name>]` is still accepted as an alias for `[clusters.<name>]`.
@@ -69,19 +83,11 @@ enabled = true
 [clusters.dev]
 enabled = false
 
-# MCP Server Configuration (VictoriaMetrics, etc.)
-[mcp.servers.victoriametrics]
-enabled = true
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-victoriametrics"]
-
-[mcp.transport]
-transport_type = "Stdio"
-
 # AI/OPS Providers
 [aiops.victoria]
 enabled = true
 provider_type = "victoria"
+# vmselect (query) endpoint — used by built-in VictoriaMetricsProvider (currently not wired to skills).
 endpoint = "http://victoriametrics:8428"
 timeout_secs = 30
 retry_attempts = 3

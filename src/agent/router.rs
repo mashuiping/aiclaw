@@ -8,8 +8,6 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct RouteResult {
     pub skill_name: Option<String>,
-    pub mcp_server: Option<String>,
-    pub tool_name: Option<String>,
     pub confidence: f32,
 }
 
@@ -17,17 +15,6 @@ impl RouteResult {
     pub fn skill(name: &str, confidence: f32) -> Self {
         Self {
             skill_name: Some(name.to_string()),
-            mcp_server: None,
-            tool_name: None,
-            confidence,
-        }
-    }
-
-    pub fn mcp(server: &str, tool: &str, confidence: f32) -> Self {
-        Self {
-            skill_name: None,
-            mcp_server: Some(server.to_string()),
-            tool_name: Some(tool.to_string()),
             confidence,
         }
     }
@@ -56,9 +43,6 @@ impl Router {
 
         let skill_results = self.route_to_skill(intent);
         results.extend(skill_results);
-
-        let mcp_results = self.route_to_mcp(intent);
-        results.extend(mcp_results);
 
         results.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
         results.truncate(3);
@@ -156,77 +140,30 @@ impl Router {
         results
     }
 
-    /// Extract domain tags from intent entities
+    /// Extract domain tags from intent entities.
+    ///
+    /// Tags come directly from the LLM-classified entities. No hardcoded synonym
+    /// expansions -- the skill registry's own `domain_tags` are the source of truth.
     fn get_intent_domain_tags(&self, intent: &Intent) -> Vec<String> {
         let mut tags = Vec::new();
 
-        // Domain
         if let Some(ref domain) = intent.entities.domain {
             tags.push(domain.clone());
         }
 
-        // Virtualization
         if let Some(ref virt) = intent.entities.virtualization {
             tags.push(virt.clone());
-            // Also add common variations
-            match virt.as_str() {
-                "hami" => {
-                    tags.push("gpu".to_string());
-                    tags.push("vgpu".to_string());
-                }
-                "vgpu" => {
-                    tags.push("gpu".to_string());
-                }
-                _ => {}
-            }
         }
 
-        // Resource state - may indicate specific skill
         if let Some(ref state) = intent.entities.resource_state {
-            match state.as_str() {
-                "pending" => {
-                    // Could be scheduling issue
-                    tags.push("pending".to_string());
-                    tags.push("scheduling".to_string());
-                }
-                "crashloop" => {
-                    tags.push("crashloop".to_string());
-                    tags.push("oom".to_string());
-                }
-                "oom" => {
-                    tags.push("oom".to_string());
-                    tags.push("memory".to_string());
-                }
-                _ => {}
-            }
+            tags.push(state.clone());
         }
 
-        // Error keyword
         if let Some(ref error) = intent.entities.error_keyword {
             tags.push(error.clone());
         }
 
         tags
-    }
-
-    /// Route to MCP servers/tools
-    fn route_to_mcp(&self, intent: &Intent) -> Vec<RouteResult> {
-        let mut results = Vec::new();
-
-        match intent.intent_type {
-            IntentType::Logs => {
-                results.push(RouteResult::mcp("victoriametrics", "victorialogs_query", 0.8));
-            }
-            IntentType::Metrics => {
-                results.push(RouteResult::mcp("victoriametrics", "victoriametrics_query", 0.8));
-            }
-            IntentType::Health => {
-                results.push(RouteResult::mcp("victoriametrics", "victoriametrics_health", 0.7));
-            }
-            _ => {}
-        }
-
-        results
     }
 
     /// Calculate confidence for a skill matching an intent
