@@ -340,7 +340,6 @@ impl LLMSkillExecutor {
         let tool = aiclaw_types::skill::SkillTool {
             name: "shell_command".to_string(),
             description: "Shell command".to_string(),
-            kind: aiclaw_types::skill::ToolKind::Shell,
             command: command.to_string(),
             args: HashMap::new(),
             env: tool_env,

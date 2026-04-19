@@ -35,7 +35,8 @@ use crate::config::FeishuConfig;
 struct FeishuWebhookState {
     tx: mpsc::Sender<ChannelMessage>,
     channel_name: String,
-    verify_token: Option<String>,
+    /// Reserved for Feishu webhook URL verification / signature checks.
+    _verify_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -181,7 +182,8 @@ pub struct FeishuChannel {
     name: String,
     config: FeishuConfig,
     api_client: Arc<FeishuAPIClient>,
-    streaming_buffer: StreamingBuffer,
+    /// Wired when Feishu streaming replies are implemented (see design docs).
+    _streaming_buffer: StreamingBuffer,
 }
 
 impl FeishuChannel {
@@ -195,7 +197,7 @@ impl FeishuChannel {
             name: name.into(),
             config,
             api_client: Arc::new(api_client),
-            streaming_buffer: StreamingBuffer::new(),
+            _streaming_buffer: StreamingBuffer::new(),
         })
     }
 }
@@ -603,7 +605,7 @@ impl FeishuChannel {
         let state = FeishuWebhookState {
             tx,
             channel_name: self.name.clone(),
-            verify_token: self.config.verify_token.clone(),
+            _verify_token: self.config.verify_token.clone(),
         };
 
         let app = Router::new()
@@ -619,7 +621,11 @@ impl FeishuChannel {
         axum::serve(listener, app).await?;
         Ok(())
     }
+}
 
+/// Alternate long-polling implementation (unused; the live path uses `FeishuAPIClient::long_poll_messages` in `Channel::listen`).
+#[allow(dead_code)]
+impl FeishuChannel {
     async fn listen_long_polling(&self, tx: mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
         info!("Feishu long polling listener started");
 

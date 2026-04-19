@@ -21,31 +21,22 @@ pub struct SkillMetadata {
     /// Domain-specific tags for routing (gpu, hami, apisix, coredns, etc.)
     #[serde(default)]
     pub domain_tags: Vec<String>,
-    /// Declarative shell/HTTP tools from `SKILL.toml` (merged when co-located with `SKILL.md`).
+    /// Declarative shell tools (filesystem loader leaves this empty; use LLM skill execution).
     #[serde(default)]
     pub tools: Vec<SkillTool>,
 }
 
-/// Skill tool definition
+/// Declarative shell tool: `command` is whitespace-split into program and arguments after `{{name}}` interpolation from `args`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillTool {
     pub name: String,
     pub description: String,
-    pub kind: ToolKind,
     pub command: String,
     pub args: HashMap<String, String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
-}
-
-/// Tool execution kind
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ToolKind {
-    Shell,
-    Http,
-    Script,
 }
 
 /// Skill prompts
@@ -97,47 +88,3 @@ pub struct SkillContext {
     pub session_id: Option<String>,
 }
 
-/// Skill manifest (from SKILL.toml or parsed from SKILL.md)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillManifest {
-    pub name: String,
-    pub description: String,
-    pub version: String,
-    pub author: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub always: bool,
-    #[serde(default)]
-    pub tools: Vec<SkillTool>,
-    #[serde(default)]
-    pub prompts: SkillPrompts,
-    #[serde(default)]
-    pub dependencies: Vec<String>,
-    /// Full markdown content (for SKILL.md)
-    #[serde(default)]
-    pub raw_content: String,
-    /// Applicability scenarios (for SKILL.md)
-    #[serde(default)]
-    pub applicability: Vec<String>,
-    /// Domain tags (for SKILL.md)
-    #[serde(default)]
-    pub domain_tags: Vec<String>,
-}
-
-impl SkillManifest {
-    pub fn into_metadata(self) -> SkillMetadata {
-        SkillMetadata {
-            name: self.name,
-            description: self.description,
-            version: self.version,
-            author: self.author,
-            tags: self.tags,
-            always: self.always,
-            raw_content: self.raw_content,
-            applicability: self.applicability,
-            domain_tags: self.domain_tags,
-            tools: self.tools,
-        }
-    }
-}

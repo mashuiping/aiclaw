@@ -62,8 +62,10 @@ struct ListMessagesResponse {
 
 #[derive(Debug, Deserialize)]
 struct ListMessagesData {
+    #[allow(dead_code)]
     #[serde(default)]
     has_more: bool,
+    #[allow(dead_code)]
     #[serde(default)]
     page_token: Option<String>,
     #[serde(default)]
@@ -96,6 +98,7 @@ struct ListMessageBody {
 #[derive(Debug, Deserialize)]
 struct ListMessageSender {
     id: String,
+    #[allow(dead_code)]
     #[serde(default)]
     id_type: String,
     sender_type: String,

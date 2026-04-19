@@ -8,7 +8,7 @@ use crate::config::{SkillsExecConfig, SkillsExecSecurity};
 use crate::security::command_validator::CommandValidator;
 use crate::skills::SkillExecutor;
 
-/// Validator used for both LLM-driven shell and declarative `SKILL.toml` tools.
+/// Validator used for both LLM-driven shell and declarative skill tools (e.g. programmatic `SkillTool`).
 pub fn command_validator_for_skills_exec(cfg: &SkillsExecConfig) -> Arc<CommandValidator> {
     let validator = match cfg.security {
         SkillsExecSecurity::Deny => CommandValidator::deny_all(),

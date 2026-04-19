@@ -69,7 +69,6 @@ impl TaskRunner {
             let tool = aiclaw_types::skill::SkillTool {
                 name: format!("{}_{}", task.name, i + 1),
                 description: format!("{} step {}", task.description, i + 1),
-                kind: aiclaw_types::skill::ToolKind::Shell,
                 command: cmd.clone(),
                 args: HashMap::new(),
                 env: HashMap::new(),

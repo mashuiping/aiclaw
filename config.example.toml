@@ -71,7 +71,9 @@ allow_helm = false
 [skills.exec.victoriametrics]
 # Base URL for VictoriaMetrics /select/X/prometheus endpoint (cluster) or http://host:8428 (single-node).
 vm_metrics_url = "http://localhost:8428"
-# Base URL for VictoriaLogs /select/logsql endpoint.
+# Base URL for logs: direct VictoriaLogs uses /select/logsql/... on this host.
+# For AIOps OpenAPI (skills/victoriametrics-logs/vl_query.py → POST /v1/openapi/log/queryLog), set this to the
+# gateway base only (no path); injected as $VM_LOGS_URL for skills (same value vl_query.py uses for --url).
 vm_logs_url = "http://localhost:8428"
 # Optional auth header, e.g. "Bearer <token>". Leave empty for no auth (used by curl-based tools).
 vm_auth_header = ""

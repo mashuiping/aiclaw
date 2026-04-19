@@ -1,15 +1,23 @@
 ---
 name: victoriametrics-logs
 description: >
-  Query VictoriaLogs via LogsQL. Use for: log search, log stats queries, field/stream discovery,
-  log hit patterns, log facets, and log volume analysis.
-  Triggers on: logs, log search, LogsQL, log stats, field discovery, stream discovery, log facets.
+  Query logs with LogsQL: either direct VictoriaLogs HTTP API (curl, JSON Lines) or AIOps OpenAPI
+  LogService.QueryLog via vl_query.py (AK/SK HMAC, POST JSON). Use for log search, stats, facets,
+  field/stream discovery, and vmauth-protected gateways.
+  Triggers on: VictoriaLogs, LogsQL, log search, logsql, vmauth, AK/SK, aiops logs, queryLog.
 tags: ["victoriametrics", "logs", "logsql", "observability"]
 ---
 
 # VictoriaLogs Query
 
-Query VictoriaLogs HTTP API via curl. Covers log search, stats queries, field/stream discovery, hits analysis, and facets.
+Two ways to run LogsQL — pick the one that matches the environment:
+
+| Mode | Auth | Transport | Response |
+|------|------|-----------|----------|
+| **Direct VictoriaLogs** | `$VM_AUTH_HEADER` (Bearer) or none | `GET` `/select/logsql/*` | JSON Lines (one object per line) |
+| **AIOps OpenAPI** | AK/SK (HMAC, `vl_query.py`) | `POST` `/v1/openapi/log/queryLog` | JSON object; log rows in `data` |
+
+The sections below use **curl** for direct VictoriaLogs. For gateways that only accept signed OpenAPI calls, use **`vl_query.py`** (see [AK/SK OpenAPI](#aksk-openapi-vl_querypy)).
 
 ## Environment Variables
 
@@ -20,11 +28,11 @@ These are **injected automatically** by AIClaw — do not hardcode values:
 
 ## Critical Rules
 
-- **ALWAYS pass `start`** on ALL endpoints — omitting it scans ALL stored data (extremely expensive)
-- `stats_query` uses `time` parameter (always pass explicitly)
-- `stats_query_range` uses `start`/`end`/`step`
-- `/select/logsql/query` returns JSON Lines (one JSON object per line), NOT a JSON array
-- LogsQL queries with special characters MUST be URL-encoded (use `--data-urlencode`)
+- **ALWAYS pass `start`** on direct `/select/logsql/*` calls — omitting it scans ALL stored data (extremely expensive)
+- `stats_query` uses `time` (always pass explicitly); `stats_query_range` uses `start`/`end`/`step`
+- **Direct** `/select/logsql/query` returns **JSON Lines** (one JSON object per line), not a JSON array
+- LogsQL queries with special characters MUST be URL-encoded (`--data-urlencode` on curl)
+- **OpenAPI** `queryLog` uses a **POST JSON body** (`page_size`, `start`/`end` as Unix seconds in the API). Do not confuse with GET query-string style.
 
 ## Auth Pattern
 
@@ -37,23 +45,31 @@ curl -s ${VM_AUTH_HEADER:+-H "$VM_AUTH_HEADER"} \
 
 When `$VM_AUTH_HEADER` is empty, the `-H` flag is omitted automatically.
 
-### Python script (AK/SK auth)
+### AK/SK OpenAPI (`vl_query.py`)
 
-When VictoriaLogs is behind vmauth with AK/SK authentication, use the helper script:
+Use when the platform exposes **LogService.QueryLog** (same contract as `aiops-api-go-client` `LogServiceQueryLog`): **POST** `…/v1/openapi/log/queryLog` with JSON body, **not** GET to `/select/logsql/query`.
+
+- **Auth**: HMAC-SHA256 double signature + headers (`x-alogic-*`, `x-original-url`), matching `middleware/auth` in `aiops-api-go-client`.
+- **Body** (snake_case): `query` (LogsQL string), `start` / `end` (epoch seconds; script accepts RFC3339, Unix digits, or naive `YYYY-MM-DD HH:MM:SS` as **UTC**), `page_size` (from `--limit`), optional `region_id`, `data_source_xid`, `page_index`, `reverse`.
+- **Response**: single JSON; script prints the **`data`** array (or stderr + exit on HTTP/API errors).
 
 ```bash
 python skills/victoriametrics-logs/vl_query.py \
-  --query '{kubernetes_namespace="tai-develop"} kubernetes_pod_instance="infra-platform"' \
-  --start "$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)" \
-  --limit 100
+  --url "$VM_LOGS_URL" \
+  --ak "$VM_AK" \
+  --sk "$VM_SK" \
+  --query '_msg: "infra_platform"' \
+  --start "2026-04-19 10:00:00" \
+  --end "2026-04-19 19:00:00" \
+  --limit 2
 ```
 
-Environment variables (injected by AIClaw from `[skills.exec.victoriametrics]` config):
-- `$VM_LOGS_URL` — VictoriaLogs base URL, e.g. `https://vlselect.example.com`
-- `$VM_AK` — Access Key (from `vm_ak` config)
-- `$VM_SK` — Secret Key (from `vm_sk` config)
+Environment variables (e.g. AIClaw `[skills.exec.victoriametrics]`):
 
-The script replicates the HMAC-SHA256 double-signature scheme from `aiops-api-go-client`.
+- `$VM_LOGS_URL` — gateway base URL (no path suffix); set via `vm_logs_url` in config or `export VM_LOGS_URL=...`
+- `$VM_AK` / `$VM_SK` — Access Key / Secret Key
+
+Omit `--url` / `--ak` / `--sk` when the same values are set in the environment.
 
 ## Log Query (Primary)
 
@@ -179,7 +195,7 @@ curl -s ${VM_AUTH_HEADER:+-H "$VM_AUTH_HEADER"} \
 
 ## Important Notes
 
-- All times use RFC3339 format: `2026-03-07T09:00:00Z`. Unix timestamps NOT supported.
-- Collect JSON Lines: `| jq -s .`
-- `facets` is the best single-call discovery tool
-- `stats_query` uses `time`, `stats_query_range` uses `start`/`end`/`step`
+- **Direct curl** times: RFC3339 in query params, e.g. `2026-03-07T09:00:00Z`. Collect JSON Lines with `| jq -s .`
+- **`vl_query.py` times**: RFC3339 (`…Z` or offset), plain Unix seconds, or naive `YYYY-MM-DD HH:MM:SS` (treated as UTC)
+- `facets` is the best single-call discovery tool on direct VictoriaLogs
+- `stats_query` uses `time`; `stats_query_range` uses `start`/`end`/`step`

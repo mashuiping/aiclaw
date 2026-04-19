@@ -71,7 +71,7 @@ impl PromptBuilder {
         if !tools.is_empty() {
             prompt.push_str("\n## Available Tools\n\n");
             for tool in tools {
-                prompt.push_str(&format!("- **{}** ({}): {}\n", tool.name, format_tool_kind(&tool.kind), tool.description));
+                prompt.push_str(&format!("- **{}**: {}\n", tool.name, tool.description));
             }
         }
 
@@ -147,14 +147,6 @@ fn truncate_skill_content(content: &str, max_chars: usize) -> String {
         .map(|(i, _)| i)
         .unwrap_or(content.len());
     format!("{}...\n(content truncated)", &content[..boundary])
-}
-
-fn format_tool_kind(kind: &aiclaw_types::skill::ToolKind) -> &'static str {
-    match kind {
-        aiclaw_types::skill::ToolKind::Shell => "shell",
-        aiclaw_types::skill::ToolKind::Http => "http",
-        aiclaw_types::skill::ToolKind::Script => "script",
-    }
 }
 
 const DEFAULT_IDENTITY: &str = "\

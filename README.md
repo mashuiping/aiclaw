@@ -61,7 +61,7 @@ Run as a service (Feishu / WeCom / WebSocket listeners):
 | **Channels** | Feishu (飞书), WeCom (企业微信), Local (`stdio` / `http` WebSocket gateway) |
 | **Interactive REPL** | Streaming replies, slash commands (`/help`, `/skills`, `/status`, `/model`, `/save`, `/resume`, `/thinkback`), tab completion, session save & resume |
 | **LLM Providers** | OpenAI, Anthropic, DeepSeek, Qwen, Zhipu, MiniMax — with routing via direct, OpenRouter, or Ollama |
-| **Skill System** | Drop-in skills from the filesystem (`SKILL.toml` or `SKILL.md` with YAML frontmatter), with shell / HTTP / script tool types |
+| **Skill System** | Drop-in skills from the filesystem (`SKILL.md` with YAML frontmatter); LLM skill loop executes documented shell / HTTP patterns |
 | **Exec Loop** | LLM-driven command execution — the model proposes `kubectl` / `helm` commands, validated by configurable security policy, then executed on the host |
 | **MCP Client** | Stdio JSON-RPC transport to any MCP server (e.g. VictoriaMetrics MCP) |
 | **Observability** | VictoriaMetrics / Prometheus integration for metrics and logs; OpenTelemetry tracing for the agent itself |
@@ -134,31 +134,15 @@ args = ["-y", "@anthropic/victoria-mcp"]
 
 ## Skills
 
-Each skill lives in its own directory under `skills_dir` with a `SKILL.toml` or `SKILL.md` manifest.
-
-**TOML example** (`skills/k8s-log-reader/SKILL.toml`):
-
-```toml
-name = "k8s-log-reader"
-description = "Read K8s pod logs"
-tags = ["kubernetes", "logs"]
-
-[[tools]]
-name = "kubectl_logs"
-kind = "shell"
-command = "kubectl"
-args = { namespace = "{{namespace}}", pod = "{{pod_name}}" }
-```
-
-**Markdown example** (`skills/inf-k8s-hami-gpu-pod/SKILL.md`): YAML frontmatter for metadata, Markdown body for the diagnostic runbook — used by the exec loop to guide LLM-driven `kubectl` commands.
+Each skill lives in its own directory under `skills_dir` with a **`SKILL.md`** file: YAML frontmatter for metadata (`name`, `description`, `tags`, …) and a Markdown body for the runbook. With `[skills.exec] enabled = true`, the exec loop reads that document and runs validated shell commands (for example `kubectl` or `curl`).
 
 ### Bundled Skills
 
 | Skill | Format | Description |
 |-------|--------|-------------|
-| `k8s-log-reader` | TOML | Read Kubernetes pod logs |
-| `k8s-health-check` | TOML | Kubernetes cluster health check |
-| `vm-query` | TOML | VictoriaMetrics / Prometheus queries |
+| `k8s-log-reader` | Markdown | Read Kubernetes pod logs |
+| `k8s-health-check` | Markdown | Kubernetes cluster health check |
+| `vm-query` | Markdown | VictoriaMetrics / Prometheus queries |
 | `inf-k8s-hami-gpu-pod` | Markdown | HAMi GPU pod pending troubleshooting runbook |
 
 > To use the bundled skills, set `skills_dir` to this repo's `skills/` directory or symlink them into `~/.aiclaw/skills`.

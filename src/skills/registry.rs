@@ -139,7 +139,7 @@ impl SkillRegistry {
             .collect()
     }
 
-    /// Declarative tools from `SKILL.toml` (or merged when loaded with `SKILL.md`).
+    /// Declarative tools (if populated at runtime; filesystem loader does not attach tools).
     pub fn get_tools(&self, skill_name: &str) -> Option<Vec<SkillTool>> {
         self.get(skill_name).map(|s| s.tools.clone())
     }

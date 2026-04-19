@@ -1,6 +1,6 @@
 //! Skill loader - loads skills from filesystem
 
-use aiclaw_types::skill::{SkillManifest, SkillMetadata, SkillTool};
+use aiclaw_types::skill::SkillMetadata;
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
@@ -51,36 +51,18 @@ impl SkillLoader {
         Ok(skills)
     }
 
-    /// Load a single skill from a directory
+    /// Load a single skill from a directory (`SKILL.md` with YAML frontmatter only).
     pub fn load_skill_from_dir(&self, dir: &Path) -> anyhow::Result<SkillMetadata> {
-        let toml_path = dir.join("SKILL.toml");
         let md_path = dir.join("SKILL.md");
 
         if md_path.exists() {
-            let mut meta = self.load_from_md(&md_path)?;
-            if toml_path.exists() {
-                let extra_tools = self.load_skill_tools(dir)?;
-                if !extra_tools.is_empty() {
-                    meta.tools = extra_tools;
-                }
-            }
-            Ok(meta)
-        } else if toml_path.exists() {
-            self.load_from_toml(&toml_path)
+            self.load_from_md(&md_path)
         } else {
-            anyhow::bail!("No SKILL.toml or SKILL.md found in {:?}", dir);
+            anyhow::bail!("No SKILL.md found in {:?}", dir);
         }
     }
 
-    /// Load skill from TOML manifest
-    fn load_from_toml(&self, path: &Path) -> anyhow::Result<SkillMetadata> {
-        let content = std::fs::read_to_string(path)?;
-        let manifest: SkillManifest = toml::from_str(&content)?;
-        Ok(manifest.into_metadata())
-    }
-
     /// Load skill from Markdown with frontmatter
-    /// SKILL.md is preferred over SKILL.toml
     fn load_from_md(&self, path: &Path) -> anyhow::Result<SkillMetadata> {
         let content = std::fs::read_to_string(path)?;
 
@@ -109,20 +91,6 @@ impl SkillLoader {
             domain_tags,
             tools: Vec::new(),
         })
-    }
-
-    /// Load skill tools from manifest (for TOML skills)
-    pub fn load_skill_tools(&self, dir: &Path) -> anyhow::Result<Vec<SkillTool>> {
-        let toml_path = dir.join("SKILL.toml");
-
-        if !toml_path.exists() {
-            return Ok(Vec::new());
-        }
-
-        let content = std::fs::read_to_string(&toml_path)?;
-        let manifest: SkillManifest = toml::from_str(&content)?;
-
-        Ok(manifest.tools)
     }
 }
 

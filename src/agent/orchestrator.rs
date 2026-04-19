@@ -13,7 +13,7 @@ mod messages {
     pub const EXEC_ERROR_FALLBACK: &str = "抱歉，处理你的请求时遇到了问题，请稍后重试。";
     pub const NO_LLM_PROVIDER: &str = "已启用 `skills.exec.enabled`，但未配置可用的 LLM provider（请使用 `AgentOrchestrator::with_llm` 并提供模型）。";
     pub const SKILL_EXEC_DISABLED: &str = "该技能包含诊断文档，但未启用自动执行。请在配置中设置 `[skills].exec.enabled = true`（并配置 LLM 与命令安全策略）。";
-    pub const SKILL_NO_TOOLS: &str = "该技能未声明可执行工具（`SKILL.toml` 的 `[[tools]]`），且无可用文档内容。";
+    pub const SKILL_NO_TOOLS: &str = "该技能无可执行声明式工具，且未启用或未提供可用的 `SKILL.md` 文档内容。";
     pub const ALL_CLUSTERS_FAILED: &str = "抱歉，所有集群查询都失败了。";
     pub const MULTI_CLUSTER_TITLE: &str = "## 多集群查询结果\n\n";
     pub const MULTI_CLUSTER_HEADER: &str = "| 集群 | 状态 | 摘要 |\n|------|------|------|\n";
@@ -752,12 +752,8 @@ impl AgentOrchestrator {
             }
 
             let mut tool_run = tool.clone();
-            if tool_run.kind == aiclaw_types::skill::ToolKind::Shell {
-                let expanded =
-                    Self::interpolate_skill_placeholders(&tool_run.command, &args);
-                tool_run.command =
-                    apply_kubectl_context(&expanded, kubectl_ctx.as_deref());
-            }
+            let expanded = Self::interpolate_skill_placeholders(&tool_run.command, &args);
+            tool_run.command = apply_kubectl_context(&expanded, kubectl_ctx.as_deref());
 
             match self
                 .skill_executor
@@ -961,7 +957,6 @@ impl AgentOrchestrator {
         let tool = aiclaw_types::skill::SkillTool {
             name: tool_name.clone(),
             description: step.description.clone(),
-            kind: aiclaw_types::skill::ToolKind::Shell,
             command: cmd_with_ctx,
             args: HashMap::new(),
             env: HashMap::new(),

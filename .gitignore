@@ -19,3 +19,14 @@ Thumbs.db
 .env.local
 .docs
 .worktree
+
+# Python (e.g. skills/*.py)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
