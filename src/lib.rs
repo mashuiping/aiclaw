@@ -13,8 +13,8 @@ pub mod feedback;
 pub mod llm;
 pub mod observability;
 pub mod repl;
-
 pub mod security;
+pub mod session_store;
 pub mod skills;
 pub mod utils;
 
