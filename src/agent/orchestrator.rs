@@ -39,6 +39,7 @@ use tracing::{debug, error, info, warn};
 
 use super::context::ContextManager;
 use super::intent::IntentParser;
+use super::memory::MemoryManager;
 use super::output_budget::{self, OutputBudget};
 use super::planner::{PlanStep, Planner};
 use super::prompt_builder::PromptBuilder;
@@ -90,6 +91,7 @@ pub struct AgentOrchestrator {
     /// Available for building dynamic prompts when skills context is needed.
     #[allow(dead_code)]
     prompt_builder: PromptBuilder,
+    memory_manager: Option<MemoryManager>,
 }
 
 impl AgentOrchestrator {
@@ -130,6 +132,7 @@ impl AgentOrchestrator {
             output_budget: OutputBudget::default_budget(),
             context_manager: None,
             prompt_builder: PromptBuilder::new(),
+            memory_manager: None,
         }
     }
 
@@ -193,6 +196,7 @@ impl AgentOrchestrator {
             output_budget: OutputBudget::default_budget(),
             context_manager,
             prompt_builder: PromptBuilder::new(),
+            memory_manager: None,
         }
     }
 
@@ -250,6 +254,12 @@ impl AgentOrchestrator {
             message.content.text.clone(),
         );
 
+        // Notify memory manager of turn start
+        if let Some(ref mm) = self.memory_manager {
+            let turn_count = session.context.conversation_history.len();
+            mm.on_turn_start(turn_count, &message.content.text);
+        }
+
         if let Some(p) = crate::skills::kubeconfig_hint::extract_from_user_text(&message.content.text) {
             self.session_manager
                 .set_kubeconfig_path(&session.id, p.clone());
@@ -282,6 +292,13 @@ impl AgentOrchestrator {
             message.channel_name,
             utf8_prefix_chars(&message.content.text, 100)
         );
+
+        // Prefetch memory context before LLM calls
+        let memory_context = if let Some(ref mm) = self.memory_manager {
+            mm.prefetch_all(&message.content.text)
+        } else {
+            String::new()
+        };
 
         // Check for follow-up questions or clarification requests
         let is_followup = self.is_followup_question(&message.content.text);
@@ -372,6 +389,12 @@ impl AgentOrchestrator {
             }
             if let Some(ref ns) = intent.entities.namespace {
                 self.session_manager.set_current_namespace(&session.id, ns.clone());
+            }
+
+            // Sync memory with the completed turn
+            if let Some(ref mm) = self.memory_manager {
+                mm.sync_all(&message.content.text, &resp.message.content);
+                mm.queue_prefetch_all(&message.content.text);
             }
         }
 
@@ -1038,6 +1061,11 @@ impl AgentOrchestrator {
                     error!("Failed to handle message: {}", e);
                 }
             }
+        }
+
+        // Shutdown memory manager
+        if let Some(ref mm) = self.memory_manager {
+            mm.shutdown_all();
         }
     }
 
