@@ -11,8 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-use crate::config::schema::SessionState;
-use aiclaw_types::agent::{ChatMessage, MessageRole, Session, SessionContext};
+use aiclaw_types::agent::{ChatMessage, MessageRole, Session, SessionContext, SessionState};
 pub use error::SessionStoreError;
 pub use schema::SCHEMA_VERSION;
 
@@ -155,17 +154,18 @@ impl SessionStore {
     /// Load a session by ID. Returns None if not found.
     pub fn get_session(&self, session_id: &str) -> Result<Option<Session>, SessionStoreError> {
         let conn = self.get_conn()?;
-        let mut rows = conn.query(
+        let result = conn.query_row(
             "SELECT id, user_id, channel, thread_id, created_at, last_activity, state,
                     current_cluster, current_namespace, pending_question, kubeconfig_path
              FROM sessions WHERE id = ?1",
             params![session_id],
-        )?;
-
-        if let Some(row) = rows.next()? {
-            Ok(Some(self.row_to_session(row)?))
-        } else {
-            Ok(None)
+            |row| Ok(self.row_to_session(row)),
+        );
+        match result {
+            Ok(Ok(session)) => Ok(Some(session)),
+            Ok(Err(e)) => Err(e),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(SessionStoreError::Database(e)),
         }
     }
 
@@ -276,7 +276,7 @@ impl SessionStore {
                JOIN messages m ON messages_fts.rowid = m.id
                WHERE messages_fts MATCH ?1
                ORDER BY rank
-               LIMIT ?2",
+               LIMIT ?2"#
         )?;
 
         let rows = stmt.query_map(params![fts_query, limit as i64], |row| {

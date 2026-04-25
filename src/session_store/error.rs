@@ -1,6 +1,6 @@
-use thiserror::ThisError;
+use thiserror::Error;
 
-#[derive(ThisError, Debug)]
+#[derive(Error, Debug)]
 pub enum SessionStoreError {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
