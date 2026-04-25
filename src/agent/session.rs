@@ -1,5 +1,6 @@
 //! Session management
 
+use crate::session_store::SessionStore;
 use aiclaw_types::agent::{ChatMessage, InteractionRecord, MessageRole, Session, SessionContext, SessionState};
 use chrono::Utc;
 use dashmap::DashMap;
@@ -15,6 +16,7 @@ pub struct SessionManager {
     sessions: DashMap<String, Arc<Session>>,
     user_sessions: DashMap<String, Vec<String>>,
     timeout: Duration,
+    store: Option<Arc<SessionStore>>,
 }
 
 impl SessionManager {
@@ -23,6 +25,17 @@ impl SessionManager {
             sessions: DashMap::new(),
             user_sessions: DashMap::new(),
             timeout: Duration::from_secs(timeout_secs),
+            store: None,
+        }
+    }
+
+    /// Create a SessionManager without persistence (in-memory only).
+    pub fn with_store(timeout_secs: u64, store: Arc<SessionStore>) -> Self {
+        Self {
+            sessions: DashMap::new(),
+            user_sessions: DashMap::new(),
+            timeout: Duration::from_secs(timeout_secs),
+            store: Some(store),
         }
     }
 
@@ -53,6 +66,13 @@ impl SessionManager {
 
         let session = Arc::new(session);
 
+        // Persist to SQLite
+        if let Some(store) = &self.store {
+            if let Err(e) = store.create_session(&session) {
+                tracing::warn!("failed to persist session {}: {}", session.id, e);
+            }
+        }
+
         // Insert under both UUID and composite key so both lookup paths work.
         self.sessions.insert(session_id.clone(), session.clone());
         self.sessions.insert(composite_key, session.clone());
@@ -79,6 +99,25 @@ impl SessionManager {
         if let Some(session) = self.sessions.get(&key) {
             if self.is_session_valid(&session) {
                 return session.value().clone();
+            }
+        }
+
+        // Check SQLite for an existing valid session keyed by user_id+channel
+        if let Some(store) = &self.store {
+            // Try to find any non-expired session for this user+channel
+            // We use the composite key as session_id for resume
+            if let Ok(Some(resumed)) = store.get_session(&key) {
+                if self.is_session_valid(&resumed) {
+                    let session = Arc::new(resumed);
+                    self.sessions.insert(key.clone(), session.clone());
+                    self.sessions.insert(session.id.clone(), session.clone());
+                    self.user_sessions
+                        .entry(user_id.to_string())
+                        .or_insert_with(Vec::new)
+                        .push(session.id.clone());
+                    debug!("Resumed session {} for user {}", session.id, user_id);
+                    return session;
+                }
             }
         }
 
@@ -148,8 +187,8 @@ impl SessionManager {
             let arc = r.value_mut();
             let session = Arc::make_mut(arc);
             let message = ChatMessage {
-                role,
-                content,
+                role: role.clone(),
+                content: content.clone(),
                 timestamp: Utc::now(),
             };
 
@@ -164,6 +203,19 @@ impl SessionManager {
             }
 
             session.last_activity = Utc::now();
+
+            // Persist to SQLite
+            if let Some(store) = &self.store {
+                let role_str = match role {
+                    MessageRole::System => "system",
+                    MessageRole::User => "user",
+                    MessageRole::Assistant => "assistant",
+                };
+                if let Err(e) = store.append_message(session_id, role_str, &content) {
+                    tracing::warn!("failed to persist message for session {}: {}", session_id, e);
+                }
+            }
+
             arc.clone()
         })
     }
