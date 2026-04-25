@@ -29,7 +29,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Error handling
 anyhow = "1.0"
-thiserror = "2.0"
+thiserror = "1"
 
 # Async traits
 async-trait = "0.1"
@@ -63,8 +63,12 @@ dirs = "5.0"
 serde_yaml = "0.9"
 
 # Database
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 r2d2 = "0.8"
+r2d2_sqlite = "0.33"
+
+# Utilities
+shellexpand = "3"
 
 [profile.release]
 lto = "fat"
@@ -113,6 +117,8 @@ axum = { workspace = true, features = ["ws"] }
 tower = { workspace = true }
 rusqlite = { workspace = true }
 r2d2 = { workspace = true }
+r2d2_sqlite = "0.33"
+shellexpand = { workspace = true }
 
 # REPL / interactive mode
 clap = { version = "4", features = ["derive"] }
