@@ -2,6 +2,7 @@
 
 pub mod context;
 pub mod intent;
+pub mod memory;
 pub mod orchestrator;
 pub mod output_budget;
 pub mod planner;
@@ -12,6 +13,7 @@ pub mod task;
 
 pub use context::*;
 pub use intent::*;
+pub use memory::*;
 pub use orchestrator::*;
 pub use output_budget::*;
 pub use planner::*;
