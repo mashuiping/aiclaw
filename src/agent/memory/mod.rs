@@ -1,6 +1,8 @@
 //! MemoryManager — orchestrates builtin + one external memory provider.
 
 mod builtin;
+pub mod holographic;
+pub mod byterover;
 
 use std::collections::HashMap;
 use std::sync::Arc;

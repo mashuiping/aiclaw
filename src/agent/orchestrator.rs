@@ -27,6 +27,7 @@ mod messages {
 
 use aiclaw_types::agent::{AgentResponse, Intent, IntentType, MessageRole, OutgoingMessage, OutputFormat};
 use aiclaw_types::channel::{ChannelMessage, SendMessage};
+use aiclaw_types::memory::MemoryProvider;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::future::Future;
@@ -47,6 +48,7 @@ use super::router::{Router, RouteResult};
 use super::session::SessionManager;
 use crate::aiops::AIOpsProvider;
 use crate::channels::Channel;
+use crate::config::schema::MemoryProviderConfig;
 use crate::config::{ClusterConfig, SkillsExecConfig};
 use crate::llm::summarizer::{Summarizer, ToolOutput};
 use crate::llm::traits::LLMProvider;
@@ -148,6 +150,7 @@ impl AgentOrchestrator {
         skills_exec: SkillsExecConfig,
         kubeconfig: Option<PathBuf>,
         default_cluster: Option<String>,
+        memory_config: &crate::config::MemoryConfig,
     ) -> Self {
         let summarizer = llm_provider.as_ref().map(|p| Arc::new(Summarizer::new(p.clone())));
         let planner = llm_provider.as_ref().map(|p| Arc::new(Planner::new(p.clone())));
@@ -175,6 +178,32 @@ impl AgentOrchestrator {
 
         let context_manager = llm_provider.as_ref().map(|p| ContextManager::new(p.clone()));
 
+        // Memory manager — picks provider from config
+        let memory_manager = if memory_config.enabled {
+            let mut mm = MemoryManager::new();
+            match &memory_config.provider {
+                MemoryProviderConfig::Holographic(hc) => {
+                    match crate::agent::memory::holographic::HolographicMemoryProvider::new(
+                        &hc.db_path, hc.default_trust, hc.min_trust_threshold,
+                    ) {
+                        Ok(p) => mm.set_external(Arc::new(p)),
+                        Err(e) => tracing::warn!("Holographic memory unavailable: {}", e),
+                    }
+                }
+                MemoryProviderConfig::ByteRover(bc) => {
+                    let p = crate::agent::memory::byterover::ByteRoverMemoryProvider::new(
+                        &bc.session_strategy, bc.brv_path.as_deref(),
+                    );
+                    if p.is_available() {
+                        mm.set_external(Arc::new(p));
+                    }
+                }
+            }
+            Some(mm)
+        } else {
+            None
+        };
+
         Self {
             name: name.into(),
             session_manager,
@@ -196,7 +225,7 @@ impl AgentOrchestrator {
             output_budget: OutputBudget::default_budget(),
             context_manager,
             prompt_builder: PromptBuilder::new(),
-            memory_manager: None,
+            memory_manager,
         }
     }
 

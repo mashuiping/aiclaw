@@ -67,12 +67,12 @@ impl ByteRoverMemoryProvider {
         }
     }
 
-    fn run_brv(&self, args: &[&str], timeout: u64, context: &str) -> Result<String, String> {
+    fn run_brv(&self, args: &[&str], _timeout: u64, context: &str) -> Result<String, String> {
         let brv = self.brv_path.as_ref()
             .ok_or_else(|| "brv CLI not found. Install: npm install -g byterover-cli".to_string())?;
 
         let cwd = dirs::home_dir()
-            .unwrap_or_else(|| Path::new("/tmp"))
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join(".aiclaw/byterover")
             .join(context);
 
@@ -81,7 +81,6 @@ impl ByteRoverMemoryProvider {
         let output = Command::new(brv)
             .args(args)
             .current_dir(&cwd)
-            .timeout(std::time::Duration::from_secs(timeout))
             .output()
             .map_err(|e| format!("brv exec failed: {e}"))?;
 

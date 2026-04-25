@@ -201,6 +201,7 @@ async fn run_service(
             config.skills.exec.clone(),
             kubeconfig,
             config.agent.default_cluster.clone(),
+            &config.memory,
         ))
     } else {
         Arc::new(AgentOrchestrator::new(
