@@ -189,6 +189,102 @@ pub struct Config {
 
     #[serde(default)]
     pub llm: LLMConfig,
+
+    #[serde(default)]
+    pub memory: MemoryConfig,
+}
+
+// ============================================================================
+// Memory Configuration
+// ============================================================================
+
+/// Memory provider configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryConfig {
+    #[serde(default = "default_memory_enabled")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub provider: MemoryProviderConfig,
+}
+
+fn default_memory_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum MemoryProviderConfig {
+    #[serde(rename = "holographic")]
+    Holographic(HolographicMemoryConfig),
+
+    #[serde(rename = "byterover")]
+    ByteRover(ByteRoverMemoryConfig),
+}
+
+impl Default for MemoryProviderConfig {
+    fn default() -> Self {
+        MemoryProviderConfig::Holographic(HolographicMemoryConfig {
+            db_path: default_holographic_db_path(),
+            auto_extract: false,
+            default_trust: default_trust(),
+            min_trust_threshold: default_min_trust(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HolographicMemoryConfig {
+    #[serde(default = "default_holographic_db_path")]
+    pub db_path: String,
+
+    #[serde(default)]
+    pub auto_extract: bool,
+
+    #[serde(default = "default_trust")]
+    pub default_trust: f64,
+
+    #[serde(default = "default_min_trust")]
+    pub min_trust_threshold: f64,
+}
+
+fn default_holographic_db_path() -> String {
+    "~/.aiclaw/holographic_memory.db".to_string()
+}
+
+fn default_trust() -> f64 {
+    0.5
+}
+
+fn default_min_trust() -> f64 {
+    0.3
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ByteRoverMemoryConfig {
+    #[serde(default = "default_session_strategy")]
+    pub session_strategy: String,
+
+    #[serde(default)]
+    pub brv_path: Option<String>,
+}
+
+fn default_session_strategy() -> String {
+    "per-session".to_string()
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_memory_enabled(),
+            provider: MemoryProviderConfig::Holographic(HolographicMemoryConfig {
+                db_path: default_holographic_db_path(),
+                auto_extract: false,
+                default_trust: default_trust(),
+                min_trust_threshold: default_min_trust(),
+            }),
+        }
+    }
 }
 
 fn channel_config_enabled(c: &ChannelConfig) -> bool {
@@ -625,6 +721,7 @@ impl Default for Config {
             security: SecurityConfig::default(),
             logging: LoggingConfig::default(),
             llm: LLMConfig::default(),
+            memory: MemoryConfig::default(),
         }
     }
 }
