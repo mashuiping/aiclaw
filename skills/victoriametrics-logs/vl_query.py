@@ -10,6 +10,8 @@ Usage:
     python vl_query.py --url URL --ak AK --sk SK --query QUERY --start START [OPTIONS]
 
 --start / --end: RFC3339, Unix seconds, or naive YYYY-MM-DD HH:MM:SS (interpreted as UTC).
+If --end is omitted, end defaults to max(current UTC time, start + 1 second) so start < end.
+Omitted --end defaults to current UTC time, bumped to start+1s if that is still not after start.
 
 Environment variables can also be used as fallback:
     VM_LOGS_URL, VM_AK, VM_SK
@@ -141,12 +143,19 @@ def query_logs(
     path = "/v1/openapi/log/queryLog"
     full_url = f"{base}{path}"
 
+    start_unix = parse_time_to_unix(start)
+    if end:
+        end_unix = parse_time_to_unix(end)
+    else:
+        now_unix = int(time.time())
+        # API requires start < end; server may treat missing end as "now", which breaks if start is in the future.
+        end_unix = max(now_unix, start_unix + 1)
+
     body_obj: dict = {
         "query": query,
-        "start": parse_time_to_unix(start),
+        "start": start_unix,
+        "end": end_unix,
     }
-    if end:
-        body_obj["end"] = parse_time_to_unix(end)
     if limit:
         body_obj["page_size"] = limit
     if region_id:
@@ -209,7 +218,7 @@ def main():
     )
     parser.add_argument(
         "--end",
-        help="End: same formats as --start (optional)",
+        help="End: same formats as --start. If omitted, uses max(now UTC, start+1s).",
     )
     parser.add_argument(
         "--limit",

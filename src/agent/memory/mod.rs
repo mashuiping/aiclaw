@@ -1,6 +1,9 @@
 //! MemoryManager — orchestrates builtin + one external memory provider.
 
-mod builtin;
+#[cfg(test)]
+mod tests;
+
+pub mod builtin;
 pub mod holographic;
 pub mod byterover;
 

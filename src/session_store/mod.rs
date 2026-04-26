@@ -1,5 +1,8 @@
 //! SQLite-backed session store with WAL mode and FTS5.
 
+#[cfg(test)]
+mod tests;
+
 pub mod error;
 pub mod schema;
 
